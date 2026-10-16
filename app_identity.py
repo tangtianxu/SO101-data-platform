@@ -8,7 +8,7 @@ import uuid
 
 from common import HERE
 
-VERSION='0.3.2'
+VERSION='0.3.3'
 APP_ID='so101.data-platform.portable'
 ENTRY=HERE/'launch.cmd'
 

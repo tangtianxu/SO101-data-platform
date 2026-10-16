@@ -1,5 +1,5 @@
 'use strict';
-let datasetNamingOptions=null,datasetNamingReady=null,recordNameForm=null,newNameForm=null,editNameForm=null,cropNameForm=null;
+let datasetNamingOptions=null,datasetNamingReady=null,recordNameForm=null,editNameForm=null,cropNameForm=null;
 let editNameRoot=null;
 
 class DatasetNameForm {
@@ -112,16 +112,14 @@ async function ensureDatasetNaming(){
       const path=await window.pywebview.api.choose_folder($('record-parent').value);if(path){$('record-parent').value=path;await recordNameForm.update();}
     })()));
     setInterval(()=>{if(!state?.active&&$('record-target-mode').value==='new')recordNameForm.update();},30000);
-    const oldCreate=document.querySelectorAll('.library-create')[0],oldArchive=document.querySelectorAll('.library-create')[1];
+    const oldArchive=$('dataset-archive-panel');
     const manager=document.createElement('details');manager.className='panel library-management';
-    manager.innerHTML='<summary>数据集管理：新建／名称与备注／恢复归档</summary><div class="library-tabs"><button class="button" data-manager-tab="new">新建采集计划</button><button class="button" data-manager-tab="label">名称、分类与备注</button><button class="button" data-manager-tab="archive">恢复归档</button></div><div id="manager-new"></div><div id="manager-label" class="hidden"><div id="edit-name-form"></div><button id="save-dataset-label" class="button primary">保存名称与分类（不移动文件夹）</button><p class="field-help">可训练是人工审核标签，不自动改变训练条目。</p></div><div id="manager-archive" class="hidden"></div>';
-    oldCreate.before(manager);$('manager-new').append(oldCreate);$('manager-archive').append(oldArchive);oldCreate.open=true;oldArchive.open=true;oldCreate.querySelector('summary').hidden=true;oldArchive.querySelector('summary').hidden=true;
+    manager.innerHTML='<summary>数据集管理：名称与备注／恢复归档</summary><div class="library-tabs"><button class="button selected" data-manager-tab="label">名称、分类与备注</button><button class="button" data-manager-tab="archive">恢复归档</button></div><div id="manager-label"><div id="edit-name-form"></div><button id="save-dataset-label" class="button primary">保存名称与分类（不移动文件夹）</button><p class="field-help">可训练是人工审核标签，不自动改变训练条目。新建及补录统一在采集工作台进行。</p></div><div id="manager-archive" class="hidden"></div>';
+    oldArchive.before(manager);$('manager-archive').append(oldArchive);oldArchive.open=true;oldArchive.querySelector('summary').hidden=true;
     manager.querySelectorAll('[data-manager-tab]').forEach(button=>button.addEventListener('click',()=>{
-      for(const name of ['new','label','archive'])$('manager-'+name).classList.toggle('hidden',name!==button.dataset.managerTab);
+      for(const name of ['label','archive'])$('manager-'+name).classList.toggle('hidden',name!==button.dataset.managerTab);
       manager.querySelectorAll('[data-manager-tab]').forEach(b=>b.classList.toggle('selected',b===button));
     }));
-    const newContainer=document.createElement('div');oldCreate.querySelector('.create-row').before(newContainer);$('new-dataset-name').readOnly=true;$('create-dataset').textContent='带入采集工作台';
-    newNameForm=new DatasetNameForm(newContainer,'new',{capture:true,onPath:(path,result)=>{$('new-dataset-name').value=result?.name||'';}});await newNameForm.update();
     editNameForm=new DatasetNameForm($('edit-name-form'),'edit');
     $('save-dataset-label').addEventListener('click',()=>handle((async()=>{
       const root=$('dataset-select').value;if(!root||root!==editNameRoot)throw Error('请先选择数据集');

@@ -148,7 +148,6 @@ function updateControls() {
   const dataset=datasetItems.find(d=>d.root===$('dataset-select').value);
   $('archive-dataset').disabled=resources||!dataset||!!dataset.protected;
   $('archive-dataset').title=dataset?.protected||'整份文件夹移入工作区可恢复归档，不永久删除';
-  $('create-dataset').disabled=resources;
   $('restore-dataset').disabled=resources||!lastArchive;
   $('restore-selected').disabled=resources||!$('archive-select').value;
   updateNamingControls();
@@ -342,11 +341,6 @@ $('restore-selected').addEventListener('click',()=>handle((async()=>{
   const manifest=$('archive-select').value;if(!manifest)return;
   if(!await confirmOperation('恢复归档数据集','将所选整份文件夹恢复到原目录。若原目录已存在则拒绝覆盖，不修改其他数据集。'))return;
   await api('/api/dataset-management',{action:'restore',manifest});await refreshDatasets();toast('已恢复到原目录。');
-})()));
-$('create-dataset').addEventListener('click',()=>handle((async()=>{
-  await ensureDatasetNaming();const plan=await newNameForm.update();if(!plan)throw Error('请核对父目录、语言指令和描述');
-  $('record-target-mode').value='new';$('record-parent').value=plan.parent;$('record-task').value=plan.spec.instruction;$('record-group').value=plan.spec.description;
-  await recordNameForm.update();recordTargetChanged();setView('capture');toast('已带入新建计划；连接采集设备时创建目录，尚未访问设备。');
 })()));
 $('archive-dataset').addEventListener('click',()=>handle((async()=>{
   const item=datasetItems.find(d=>d.root===$('dataset-select').value);if(!item||item.protected)return;

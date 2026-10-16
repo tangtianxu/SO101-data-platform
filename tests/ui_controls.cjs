@@ -199,3 +199,40 @@ test('clearing a filtered-out selection clears stale review and archive state',a
   f.run('revealDatasetChoice("QA/raw");library={root:"QA/raw",episodes:[]};');category(f,'train');await pause(0);
   assert.equal(f.$('dataset-select').value,'');assert.equal(f.run('library'),null);assert.equal(f.$('archive-dataset').disabled,true);
 });
+
+async function initializeNaming(f){
+  const base={schema_version:2,domain:'real',stage:'raw',review:'pending',started_at:'2026-10-16T10:10',instruction:'把娃娃放进盒子',description:'固定位置',note:'',sequence:1};
+  const fetch=f.w.fetch;
+  f.w.fetch=async(url,opts={})=>{
+    if(url==='/api/naming-options')return {ok:true,json:async()=>({domains:{real:'实机',sim:'仿真'},stages:{raw:'原始',processed:'处理后'},reviews:{pending:'待审核',train:'可训练',exclude:'排除'},simple_defaults:base})};
+    if(url==='/api/capture-plan'){
+      f.calls.push({url,body:JSON.parse(opts.body)});
+      return {ok:true,json:async()=>({name:'QA-new-capture',root:'QA/datasets/QA-new-capture',parent:'QA/datasets',spec:base})};
+    }
+    return fetch(url,opts);
+  };
+  await f.run('ensureDatasetNaming()');
+}
+test('only capture workbench has new-dataset planning; dataset page has no duplicate creation entry',async t=>{
+  const f=await fixture(t);await initializeNaming(f);
+  for(const id of ['create-dataset','new-dataset-name','manager-new'])assert.equal(f.$(id),null);
+  assert.equal(f.w.document.querySelector('[data-manager-tab="new"]'),null);
+  assert.ok(f.$('record-name-form').querySelector('.dataset-name-form'));
+  assert.ok(f.$('record-target-mode').querySelector('option[value="new"]'));
+  assert.ok(f.$('record-target-mode').querySelector('option[value="existing"]'));
+  assert.ok(f.$('prepare-record'));assert.equal(f.calls.filter(c=>c.url==='/api/capture-plan').length,1);
+  assert.equal(f.calls.some(c=>c.url==='/api/jobs'||c.url==='/api/dataset-management'),false);
+});
+test('dataset management defaults to labels and archive tab remains functional',async t=>{
+  const f=await fixture(t);await initializeNaming(f);
+  assert.equal(f.$('manager-label').classList.contains('hidden'),false);
+  assert.equal(f.$('manager-archive').classList.contains('hidden'),true);
+  f.w.document.querySelector('[data-manager-tab="archive"]').click();
+  assert.equal(f.$('manager-label').classList.contains('hidden'),true);
+  assert.equal(f.$('manager-archive').classList.contains('hidden'),false);
+  assert.equal(f.$('archive-select').closest('#manager-archive'),f.$('manager-archive'));
+  f.w.document.querySelector('[data-manager-tab="label"]').click();
+  assert.equal(f.$('manager-label').classList.contains('hidden'),false);
+  assert.equal(f.$('manager-archive').classList.contains('hidden'),true);
+  assert.ok(f.$('save-dataset-label'));assert.ok(f.$('export-crop'));assert.ok(f.$('archive-dataset'));
+});
