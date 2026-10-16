@@ -26,6 +26,9 @@ def child_folder(cfg, root, existing=True):
     home = robot_path(cfg["dataset_home"], existing=True)
     folder = robot_path(root, existing=existing)
     known=registry()['datasets'].get(root_key(folder))
+    if not known:
+        from capture_groups import group_context
+        known=group_context(folder)
     if (folder.parent != home and not known) or folder == home:
         raise ValueError("只能管理数据集总目录的直接子文件夹，不能操作总目录、嵌套路径或外部目录")
     if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
@@ -62,6 +65,8 @@ def list_datasets(cfg):
     result = []
     folders=set(Path(cfg['dataset_home']).iterdir())
     folders.update(Path(item['root']) for item in names['datasets'].values() if Path(item['root']).is_dir())
+    from capture_groups import collections
+    for collection in collections(cfg):folders.update(Path(group['root']) for group in collection['groups'] if Path(group['root']).is_dir())
     for folder in sorted(folders, key=lambda p: p.name, reverse=True):
         if folder.name.startswith(".") or not folder.is_dir() or folder.is_symlink():
             continue
@@ -72,10 +77,13 @@ def list_datasets(cfg):
         try:
             meta = json.loads(info.read_text(encoding="utf-8")) if info.is_file() else {}
             naming=describe(folder,names)
+            from capture_groups import group_context
+            try:context=group_context(folder)
+            except (OSError,ValueError,KeyError,TypeError):context=None
             result.append({"name": folder.name, "root": str(folder), "episodes": meta.get("total_episodes", 0),
                 "frames": meta.get("total_frames", 0), "version": meta.get("codebase_version", "待采集"),
                 "ready": info.is_file(), "protected": protected.get(folder.resolve()),
-                "naming": naming, **dataset_time(folder,naming)})
+                "naming": naming, "capture_group":context, **dataset_time(folder,naming)})
         except (OSError, ValueError):
             continue
     # A label edit must not promote an old dataset, and older datasets must remain discoverable.

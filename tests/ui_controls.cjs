@@ -41,7 +41,7 @@ async function fixture(t){
     }
     return {ok:true,json:async()=>value};
   };
-  for(const name of ['naming.js','history.js','joint_control.js','portable.js','app.js']){
+  for(const name of ['naming.js','history.js','joint_control.js','portable.js','capture_groups.js','app.js']){
     const file=path.join(root,'dist',name);if(!fs.existsSync(file))continue;
     let code=fs.readFileSync(file,'utf8');
     // Suppress only the polling boot line; test the actual installed handlers and all control functions.
@@ -235,4 +235,45 @@ test('dataset management defaults to labels and archive tab remains functional',
   assert.equal(f.$('manager-label').classList.contains('hidden'),false);
   assert.equal(f.$('manager-archive').classList.contains('hidden'),true);
   assert.ok(f.$('save-dataset-label'));assert.ok(f.$('export-crop'));assert.ok(f.$('archive-dataset'));
+});
+
+function addGroup(f,task,count){
+  f.$('add-capture-group').click();const row=f.$('capture-group-rows').lastElementChild;
+  const taskInput=row.querySelector('[data-group-task]'),countInput=row.querySelector('[data-group-count]');
+  taskInput.value=task;countInput.value=String(count);taskInput.dispatchEvent(new f.w.Event('input',{bubbles:true}));return row;
+}
+test('blank grouping leaves old single-dataset behavior and removes per-episode textarea',async t=>{
+  const f=await fixture(t);assert.equal(f.$('record-tasks'),null);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(captureGroupPlan())')),[]);
+  addGroup(f,'',5);assert.equal(f.$('record-count').value,'5');assert.equal(f.$('record-count').readOnly,false);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(captureGroupPlan())')),[]);assert.match(f.$('capture-group-hint').textContent,/不创建小组/);
+});
+test('group plan merges identical instructions, totals counts and restores ungrouped count on removal',async t=>{
+  const f=await fixture(t),a=addGroup(f,'抓娃娃',4),b=addGroup(f,'抓布块',3);
+  assert.equal(f.$('record-count').value,'7');assert.equal(f.$('record-count').readOnly,true);assert.equal(f.run('capturePlanInstruction()'),'分组采集');
+  b.querySelector('[data-group-task]').value='抓娃娃';b.dispatchEvent(new f.w.Event('input',{bubbles:true}));
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(captureGroupPlan())')),[{instruction:'抓娃娃',episodes:7}]);
+  assert.equal(f.run('capturePlanInstruction()'),'抓娃娃');a.querySelector('[data-group-remove]').click();b.querySelector('[data-group-remove]').click();
+  assert.equal(f.$('record-count').value,'5');assert.equal(f.$('record-count').readOnly,false);
+});
+test('invalid group counts are rejected and existing flat datasets do not gain nested groups',async t=>{
+  const f=await fixture(t);addGroup(f,'抓娃娃',20);addGroup(f,'抓布块',20);
+  assert.throws(()=>f.run('captureGroupPlan()'),/最多 30/);assert.equal(f.$('capture-group-hint').classList.contains('error'),true);
+  loadItems(f,[dataset('flat','raw','pending',1)]);f.run('refreshRecordTargets();');
+  f.$('record-target-mode').value='existing';f.$('record-existing').value='QA/flat';f.run('recordTargetChanged();');
+  assert.equal(f.$('add-capture-group').disabled,true);assert.deepEqual(JSON.parse(f.run('JSON.stringify(captureGroupPlan())')),[]);
+});
+test('existing instruction group locks its task, but collection permits multi-group append',async t=>{
+  const f=await fixture(t),item=dataset('g001','raw','pending',1,{capture_group:{id:'g001',instruction:'固定组指令',collection_root:'QA/collection',collection_name:'一次采集'}});
+  loadItems(f,[item]);f.w.__collections=[{root:'QA/collection',name:'一次采集',groups:[{id:'g001'}]}];f.run('captureCollections=window.__collections;refreshRecordTargets();');
+  f.$('record-target-mode').value='existing';f.$('record-existing').value='QA/g001';f.run('recordTargetChanged();');
+  assert.equal(f.$('record-task').readOnly,true);assert.equal(f.$('record-task').value,'固定组指令');
+  f.$('record-existing').value='QA/collection';f.run('recordTargetChanged();');assert.equal(f.$('record-task').readOnly,false);assert.equal(f.$('add-capture-group').disabled,false);
+  assert.equal(f.w.document.querySelector('#dataset-select optgroup').label,'分组采集 · 一次采集');
+});
+test('group status shows current instruction and explicit next-group start without modal',async t=>{
+  const f=await fixture(t);f.snapshot.job={id:'QA-record',kind:'record',phase:'WAITING_START',group_count:2,group_index:2,group_requested:5,group_saved:0,group_task:'抓布块'};
+  f.render();assert.equal(f.$('start-session').textContent,'开始第 2 组（5 条）');assert.match(f.$('phase-message').textContent,/抓布块/);
+  assert.match(f.$('phase-count').textContent,/小组 2\/2/);f.$('start-session').click();await pause(0);assert.equal(f.$('confirm-dialog').open,false);
+  assert.equal(f.posted()[0].body.command,'start');
 });

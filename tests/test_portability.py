@@ -240,6 +240,11 @@ class HttpTests(Fixture):
     def test_fresh_page_and_portable_module_served(self):
         with self.get('/') as response:self.assertIn(b'portable.js',response.read())
         with self.get('/portable.js') as response:self.assertIn(b'initPortableSettings',response.read())
+        with self.get('/capture_groups.js') as response:self.assertIn(b'captureGroupPlan',response.read())
+    def test_collection_listing_does_not_start_any_device(self):
+        with patch('server.subprocess.Popen') as spawn:
+            with self.get('/api/capture-collections') as response:self.assertEqual(json.load(response),[])
+            spawn.assert_not_called()
     def test_state_shows_missing_features_without_boot_failure(self):
         with self.get('/api/state') as response:value=json.load(response)
         self.assertFalse(value['resources_active']);self.assertIn('capabilities',value)

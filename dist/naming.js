@@ -22,7 +22,7 @@ class DatasetNameForm {
     this.get('parent').value=state.config.dataset_home;this.result=null;
   }
   spec(){return {...this.base,domain:this.get('domain').value,stage:this.get('stage').value,review:this.get('review').value,
-    instruction:this.record?$('record-task').value.trim():this.get('instruction').value.trim(),
+    instruction:this.record?capturePlanInstruction():this.get('instruction').value.trim(),
     description:this.record?($('record-group').value.trim()||'固定位置'):this.get('description').value.trim(),note:this.get('note').value.trim()};}
   async update(){
     const ticket=++this.ticket,hint=this.element.querySelector('.naming-feedback');
@@ -59,7 +59,7 @@ function sortDatasetItems(items){
 function datasetMatchesSearch(item){
   const query=$('dataset-search')?.value.trim().toLocaleLowerCase()||'';
   const s=item.naming?.simple_spec||{};
-  return !query||[item.name,item.naming?.display_name,s.instruction,s.description,s.note].join(' ').toLocaleLowerCase().includes(query);
+  return !query||[item.name,item.naming?.display_name,s.instruction,s.description,s.note,item.capture_group?.collection_name].join(' ').toLocaleLowerCase().includes(query);
 }
 function visibleDatasets(){
   return sortDatasetItems(datasetItems).filter(item=>(datasetCategory==='all'||datasetCategoryOf(item)===datasetCategory)&&datasetMatchesSearch(item));
@@ -67,9 +67,12 @@ function visibleDatasets(){
 function renderDatasetChoices(preferred=$('dataset-select').value){
   const select=$('dataset-select'),items=visibleDatasets();
   select.replaceChildren(new Option(items.length?'请选择数据集':$('dataset-search')?.value.trim()?'没有匹配的数据集':'此分类暂无数据集',''));
+  const collections=new Map();
   for(const item of items){
-    const option=new Option(datasetOptionLabel(item)+(item.protected?' · 保留':''),item.root);
-    option.title=(item.naming?.display_name||item.name)+'\n'+(item.started_at||'未记录采集时间，按目录创建时间排序')+'\n'+item.root;select.add(option);
+    let parent=select;const context=item.capture_group;
+    if(context){if(!collections.has(context.collection_root)){const group=document.createElement('optgroup');group.label='分组采集 · '+context.collection_name;collections.set(context.collection_root,group);select.append(group);}parent=collections.get(context.collection_root);}
+    const option=new Option((context?context.id+' · ':'')+datasetOptionLabel(item)+(item.protected?' · 保留':''),item.root);
+    option.title=(item.naming?.display_name||item.name)+'\n'+(item.started_at||'未记录采集时间，按目录创建时间排序')+'\n'+item.root;parent.append(option);
   }
   if(items.some(item=>item.root===preferred))select.value=preferred;
   document.querySelectorAll('[data-dataset-category]').forEach(button=>{
@@ -135,19 +138,23 @@ async function ensureDatasetNaming(){
   })();return datasetNamingReady;
 }
 function updateNamingControls(){if($('save-dataset-label'))$('save-dataset-label').disabled=!!state?.resources_active||!editNameRoot;}
-function fillDatasetNameEditor(item){if(!editNameForm)return;editNameRoot=item?.is_feedback?null:item?.root||null;editNameForm.set(item?.is_feedback?datasetNamingOptions.simple_defaults:item?.naming?.simple_spec||datasetNamingOptions.simple_defaults);if(editNameRoot)editNameForm.update();updateNamingControls();}
+function fillDatasetNameEditor(item){if(!editNameForm)return;editNameRoot=item?.is_feedback?null:item?.root||null;editNameForm.set(item?.is_feedback?datasetNamingOptions.simple_defaults:item?.naming?.simple_spec||datasetNamingOptions.simple_defaults);editNameForm.get('instruction').readOnly=!!item?.capture_group;if(editNameRoot)editNameForm.update();updateNamingControls();}
 function refreshRecordTargets(){
   const select=$('record-existing'),previous=select.value;select.replaceChildren(new Option('选择补录的原始数据集',''));
+  if(captureCollections.length){const group=document.createElement('optgroup');group.label='分组采集总文件夹';for(const item of captureCollections)group.append(new Option(item.name+' · '+item.groups.length+' 组',item.root));select.append(group);}
   datasetItems.filter(d=>d.naming?.append_allowed).forEach(d=>select.add(new Option(datasetOptionLabel(d),d.root)));
-  if(datasetItems.some(d=>d.root===previous&&d.naming?.append_allowed))select.value=previous;recordTargetChanged();
+  if(captureCollections.some(d=>d.root===previous)||datasetItems.some(d=>d.root===previous&&d.naming?.append_allowed))select.value=previous;recordTargetChanged();
 }
 function recordTargetChanged(){
   const existing=$('record-target-mode').value==='existing';$('record-existing').classList.toggle('hidden',!existing);$('record-name-form').classList.toggle('hidden',existing);$('record-parent-label').hidden=existing;
   $('record-browse').hidden=!existing;$('record-root').value=existing?$('record-existing').value:recordNameForm?.result?.root||'';
+  updateCaptureGroupControls();
 }
 async function captureNaming(){
   await ensureDatasetNaming();
   if($('record-target-mode').value==='existing'){
+    const collection=captureCollections.find(d=>d.root===$('record-existing').value);
+    if(collection)return {root:collection.root,existing:true,mode:'append',parent:null};
     const item=datasetItems.find(d=>d.root===$('record-existing').value);if(!item?.naming?.append_allowed)throw Error('请选择原始数据集补录，处理版不混入新原始录像');
     return {root:item.root,spec:item.naming.spec,existing:item.ready,mode:'append',parent:null};
   }

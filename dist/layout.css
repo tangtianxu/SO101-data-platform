@@ -19,6 +19,11 @@
 .top-actions { flex-wrap: wrap; }
 .task-overrides { margin: 14px 0; font-size: 11px; }
 .task-overrides summary { padding: 6px 0; }
+.capture-group-row { display:grid;grid-template-columns:65px minmax(0,1fr) auto;gap:8px;align-items:center;margin:12px 0; }
+.capture-group-row label { margin:0;font-size:11px; }
+.capture-group-row textarea { resize:vertical;min-height:54px; }
+.capture-group-row .button { padding:5px;font-size:10px; }
+#capture-group-hint.error { color:#a44b41; }
 .library-create { padding: 0 16px 12px; margin-bottom: 18px; }
 .library-create summary { padding-left: 0; }
 .create-row { display: flex; gap: 10px; max-width: 720px; }

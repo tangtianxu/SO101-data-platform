@@ -365,6 +365,30 @@ def monitor_or_control(cfg, options, bridge, out, kind):
                 atomic_json(out / "final_feedback.json", {"feedback": final, "torque_released_automatically": False})
 
 
+def await_capture_group(session,rec):
+    """Pause on group changes, with existing low-speed following and an explicit start."""
+    session.recording_start.clear();session.start_gate_completed=False
+    last=time.perf_counter();residual=None
+    def approach():
+        nonlocal last,residual
+        observation=session.robot.get_observation()
+        _,target,_=rec.clip_target(session.leader.get_action(),session.robot.limits)
+        residual=[abs(float(observation[n+'.pos'])-float(v)) for n,v in zip(NAMES,target)]
+        now=time.perf_counter();step=rec.catchup_step(session.motion.last_target,target,now-last);last=now
+        session.robot.send_action({n+'.pos':float(v) for n,v in zip(NAMES,step)})
+    rec.await_first_record_start(session,approach)
+    # Finalization may pause writes while the leader is moved. Never jump straight from
+    # that stale target to unrestricted following; retain the existing startup tolerances.
+    if session.stop.is_set():raise KeyboardInterrupt
+    if residual is None or any(e>t for e,t in zip(residual,[3.]*5+[5.])):
+        session.state('GROUP_CATCHUP')
+        stable=0
+        while stable<3:
+            if session.stop.is_set():raise KeyboardInterrupt
+            approach()
+            stable=stable+1 if all(e<=t for e,t in zip(residual,[3.]*5+[5.])) else 0
+
+
 def record_or_teleop(cfg, options, bridge, out, kind):
     import so101_record_supplement as rec
     from lerobot.configs.dataset import DatasetRecordConfig
@@ -378,6 +402,7 @@ def record_or_teleop(cfg, options, bridge, out, kind):
               "RECORDING": "START · 抓放任务，正在录制", "SAVING": "END · 正在保存本条", "RESET": "END · 遥操复位/摆物，不录入任务数据"}
     class WebSession(rec.Session):
         def state(self, phase, duration=None, **extra):
+            extra={**getattr(self,'capture_group_data',{}),**extra}
             super().state(phase, duration, **extra)
             bridge.state(phase, labels.get(phase, phase), episode=self.episode,
                          deadline=time.time()+duration if duration is not None else None, **extra)
@@ -463,89 +488,112 @@ def record_or_teleop(cfg, options, bridge, out, kind):
                 s.robot.get_observation()
                 s.robot.send_action(s.leader.get_action())
         else:
-            root = Path(options["dataset_root"])
-            resume = (root / "meta/info.json").exists()
-            before = json.loads((root / "meta/info.json").read_text(encoding="utf-8"))["total_episodes"] if resume else 0
-            report["episodes_before"] = before
-            report["sensor_target_hz"] = cfg["sensor_hz"]
-            s.episode = before
-            rich = not resume or "observation.sensors.current_raw" in json.loads((root/"meta/info.json").read_text(encoding="utf-8"))["features"]
-            report["sensors_in_parquet"] = rich
-            if not rich:
-                event("phase", phase=bridge.phase, message="旧数据集保持原 schema；新增传感器写入 extras/platform，可导出训练，旧条目缺失值不补零")
-            def combined(*args, **kwargs):
-                result = original["combine_feature_dicts"](*args, **kwargs)
-                if rich:
-                    result.update(sensor_features())
-                return result
-            official.combine_feature_dicts = combined
-            # Preserve official 6-D observation.state/action, bypass its scalar-name mapper for sensor vectors.
-            official.build_dataset_frame = lambda feature_map, values, prefix: original["build_dataset_frame"](
-                {k: v for k, v in feature_map.items() if not k.startswith("observation.sensors.")}, values, prefix)
-            official.make_robot_from_config = lambda config: s.robot
-            official.make_teleoperator_from_config = lambda config: s.leader
-            official.init_keyboard_listener = lambda **kw: (listener, s.events)
-            official.log_say = lambda *a, **kw: None
-            def loop(**kwargs):
-                nonlocal sensor_log
-                dataset = kwargs.get("dataset")
-                if dataset is not None:
-                    if sensor_log is None:
-                        sensor_dir = root / "extras/platform"
-                        sensor_dir.mkdir(parents=True, exist_ok=True)
-                        sensor_log = (sensor_dir / (out.name + ".jsonl")).open("w", encoding="utf-8", buffering=1)
-                    s.episode = dataset.num_episodes
-                    rec.install_idempotent_episode_save(dataset)
-                    tasks = options.get("episode_tasks", [])
-                    task = tasks[dataset.num_episodes-before] if tasks else cfg["task"]
-                    kwargs["single_task"] = task
-                    if not getattr(dataset, "_platform_sensor_hook", False):
-                        add_original = dataset.add_frame
-                        def add_frame(frame):
-                            if s.robot.sensor_frame is None:
-                                raise RuntimeError("扩展反馈未就绪，不写入缺失传感器的伪数据")
-                            if rich:
-                                frame.update(s.robot.sensor_frame)
-                            task_text = frame["task"]
-                            add_original(frame)
-                            sensor_log.write(json.dumps({"episode": s.episode, "frame": s.phase_frame_count-1,
-                                "time": (s.phase_frame_count-1)/30, "observation_perf": s.last_obs_time,
-                                "camera_perf": s.last_camera_times, "task": task_text,
-                                "leader_requested": s.last_requested, "follower_sent": s.last_sent, "clipped": s.last_clipped,
-                                "sample": s.robot.feedback.latest}, ensure_ascii=False, allow_nan=False)+"\n")
-                        dataset.add_frame = add_frame
-                        dataset._platform_sensor_hook = True
-                s.state("RECORDING" if dataset is not None else "RESET", kwargs["control_time_s"])
-                if dataset is not None:
-                    event("phase", phase="RECORDING", task=task, message="START · "+task)
-                if dataset is not None:
-                    rec.announce_phase("START")
-                result = original["record_loop"](**kwargs)
-                if dataset is not None:
-                    s.state("SAVING")
-                    rec.announce_phase("END")
-                    dataset.save_episode()
-                    event("saved", total=dataset.num_episodes)
-                return result
-            official.record_loop = loop
-            config = official.RecordConfig(robot=rcfg, teleop=tcfg,
-                dataset=DatasetRecordConfig(repo_id="local/so101_"+hashlib.sha256(str(root).encode()).hexdigest()[:16], root=root, single_task=cfg["task"],
-                    fps=30, episode_time_s=cfg["record_seconds"], reset_time_s=cfg["reset_seconds"],
-                    num_episodes=cfg["episodes"], push_to_hub=False, no_stamp=True,
-                    rgb_encoder=RGBEncoderConfig(vcodec="h264", g=30, crf=20, preset="fast"),
-                    streaming_encoding=True, encoder_threads=2),
-                display_data=cfg["rerun"], play_sounds=False, allow_episode_navigation=False, resume=resume)
-            if not resume and root.exists():
-                # LeRobot.create requires an absent root. Only remove our own empty plan marker,
-                # then rmdir the now-empty exact target, never recursively delete user contents.
-                contents = list(root.iterdir())
-                if contents and (len(contents) != 1 or contents[0].name != ".platform-plan.json"):
-                    raise ValueError("新数据目录已变化；拒绝覆盖")
-                if contents:
-                    contents[0].unlink()
-                root.rmdir()
-            dataset = official.record(config)
-            report["episodes_after"] = dataset.num_episodes
+            from capture_groups import RecordingLease,ListenerLease
+            targets=options.get("capture_targets") or [{"root":options["dataset_root"],"instruction":cfg["task"],"episodes":cfg["episodes"]}]
+            grouped=bool(options.get("capture_collection"));completed_in_session=0
+            robot_owner=RecordingLease(s.robot) if grouped else s.robot
+            leader_owner=RecordingLease(s.leader) if grouped else s.leader
+            listener_owner=ListenerLease(listener) if grouped else listener
+            for group_index,target in enumerate(targets,1):
+                if s.stop.is_set() or s.events["stop_recording"]:break
+                root = Path(target["root"])
+                resume = (root / "meta/info.json").exists()
+                before = json.loads((root / "meta/info.json").read_text(encoding="utf-8"))["total_episodes"] if resume else 0
+                report["episodes_before"] = report.get("episodes_before",0)+before
+                group_report={"root":str(root),"instruction":target["instruction"],"episodes_before":before,
+                              "requested":target["episodes"],"started_perf":time.perf_counter()}
+                report.setdefault("groups",[]).append(group_report)
+                s.capture_group_data={"group_index":group_index,"group_count":len(targets),
+                    "group_task":target["instruction"],"group_requested":target["episodes"],"group_root":str(root)}
+                if sensor_log:
+                    sensor_log.close();sensor_log=None
+                s.episode=before;s.capture_group_data['group_saved']=0
+                if group_index>1:
+                    await_capture_group(s,rec)
+                report["sensor_target_hz"] = cfg["sensor_hz"]
+                s.episode = before
+                rich = not resume or "observation.sensors.current_raw" in json.loads((root/"meta/info.json").read_text(encoding="utf-8"))["features"]
+                report["sensors_in_parquet"] = rich
+                group_report['sensors_in_parquet']=rich
+                if not rich:
+                    event("phase", phase=bridge.phase, message="旧数据集保持原 schema；新增传感器写入 extras/platform，可导出训练，旧条目缺失值不补零")
+                def combined(*args, **kwargs):
+                    result = original["combine_feature_dicts"](*args, **kwargs)
+                    if rich:
+                        result.update(sensor_features())
+                    return result
+                official.combine_feature_dicts = combined
+                # Preserve official 6-D observation.state/action, bypass its scalar-name mapper for sensor vectors.
+                official.build_dataset_frame = lambda feature_map, values, prefix: original["build_dataset_frame"](
+                    {k: v for k, v in feature_map.items() if not k.startswith("observation.sensors.")}, values, prefix)
+                official.make_robot_from_config = lambda config: robot_owner
+                official.make_teleoperator_from_config = lambda config: leader_owner
+                official.init_keyboard_listener = lambda **kw: (listener_owner, s.events)
+                official.log_say = lambda *a, **kw: None
+                def loop(**kwargs):
+                    nonlocal sensor_log
+                    dataset = kwargs.get("dataset")
+                    if dataset is not None:
+                        if sensor_log is None:
+                            sensor_dir = root / "extras/platform"
+                            sensor_dir.mkdir(parents=True, exist_ok=True)
+                            sensor_log = (sensor_dir / (out.name + ".jsonl")).open("w", encoding="utf-8", buffering=1)
+                        s.episode = dataset.num_episodes
+                        rec.install_idempotent_episode_save(dataset)
+                        task = target["instruction"]
+                        kwargs["single_task"] = task
+                        if not getattr(dataset, "_platform_sensor_hook", False):
+                            add_original = dataset.add_frame
+                            def add_frame(frame):
+                                if s.robot.sensor_frame is None:
+                                    raise RuntimeError("扩展反馈未就绪，不写入缺失传感器的伪数据")
+                                if rich:
+                                    frame.update(s.robot.sensor_frame)
+                                task_text = frame["task"]
+                                add_original(frame)
+                                sensor_log.write(json.dumps({"episode": s.episode, "frame": s.phase_frame_count-1,
+                                    "time": (s.phase_frame_count-1)/30, "observation_perf": s.last_obs_time,
+                                    "camera_perf": s.last_camera_times, "task": task_text,
+                                    "leader_requested": s.last_requested, "follower_sent": s.last_sent, "clipped": s.last_clipped,
+                                    "sample": s.robot.feedback.latest}, ensure_ascii=False, allow_nan=False)+"\n")
+                            dataset.add_frame = add_frame
+                            dataset._platform_sensor_hook = True
+                    s.state("RECORDING" if dataset is not None else "RESET", kwargs["control_time_s"])
+                    if dataset is not None:
+                        event("phase", phase="RECORDING", task=task, message="START · "+task)
+                    if dataset is not None:
+                        rec.announce_phase("START")
+                    result = original["record_loop"](**kwargs)
+                    if dataset is not None:
+                        s.state("SAVING")
+                        rec.announce_phase("END")
+                        dataset.save_episode()
+                        s.capture_group_data['group_saved']=dataset.num_episodes-before
+                        event("saved", total=completed_in_session+dataset.num_episodes-before if grouped else dataset.num_episodes,
+                              **s.capture_group_data)
+                    return result
+                official.record_loop = loop
+                config = official.RecordConfig(robot=rcfg, teleop=tcfg,
+                    dataset=DatasetRecordConfig(repo_id="local/so101_"+hashlib.sha256(str(root).encode()).hexdigest()[:16], root=root, single_task=target["instruction"],
+                        fps=30, episode_time_s=cfg["record_seconds"], reset_time_s=cfg["reset_seconds"],
+                        num_episodes=target["episodes"], push_to_hub=False, no_stamp=True,
+                        rgb_encoder=RGBEncoderConfig(vcodec="h264", g=30, crf=20, preset="fast"),
+                        streaming_encoding=True, encoder_threads=2),
+                    display_data=cfg["rerun"], play_sounds=False, allow_episode_navigation=False, resume=resume)
+                if not resume and root.exists():
+                    # LeRobot.create requires an absent root. Only remove our own empty plan marker,
+                    # then rmdir the now-empty exact target, never recursively delete user contents.
+                    contents = list(root.iterdir())
+                    if contents and (len(contents) != 1 or contents[0].name != ".platform-plan.json"):
+                        raise ValueError("新数据目录已变化；拒绝覆盖")
+                    if contents:
+                        contents[0].unlink()
+                    root.rmdir()
+                dataset = official.record(config)
+                group_report.update(episodes_after=dataset.num_episodes,saved=dataset.num_episodes-before,ended_perf=time.perf_counter())
+                completed_in_session+=dataset.num_episodes-before
+                report["episodes_after"]=report.get("episodes_after",0)+dataset.num_episodes
+                if s.stop.is_set() or s.events["stop_recording"]:break
         report["outcome"] = "stopped" if s.stop.is_set() or s.events["stop_recording"] else "complete"
         return report
     finally:

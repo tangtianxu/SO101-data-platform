@@ -18,6 +18,7 @@ let lastErrorAt = 0, toastTimer, drawRequest = 0;
 let lastPreview=null, operationEpoch=0;
 const frameBusy = {top:false, wrist:false}, frameUrls = {}, frameJob = {};
 phaseNames.JOINT_MOVING='关节目标执行中';
+phaseNames.GROUP_CATCHUP='本组开始已排队 · 等待低速跟随追平';
 
 async function api(path, body) {
   if(body!==undefined&&runtimeMismatch&&!(path==='/api/command'&&['stop','stop_preview','stop_device'].includes(body.command)))throw Error('窗口与后台版本不同，请正常停止后重开正式入口');
@@ -134,6 +135,7 @@ function updateControls() {
   $('approve-scene').disabled=offline||!active||phase!=='SCENE_CHECK';
   $('start-session').disabled=offline||!active||!['WAITING_START','READY','REPLAY_READY'].includes(phase);
   $('start-session').textContent=job?.kind==='act'?'开始 ACT（复位后执行）':job?.kind==='teleop'?'进入正式遥操':job?.kind==='replay'?'开始低速对齐与回放':'开始本批采集';
+  if(job?.kind==='record'&&job.group_count>1)$('start-session').textContent=`开始第 ${job.group_index} 组（${job.group_requested} 条）`;
   $('end-episode').disabled=!active||phase!=='RECORDING'||!(state.telemetry?.episode_frames>0);
   $('end-reset').disabled=!active||phase!=='RESET';
   const control=active&&job.kind==='control'&&phase==='CONTROL';
@@ -151,6 +153,7 @@ function updateControls() {
   $('restore-dataset').disabled=resources||!lastArchive;
   $('restore-selected').disabled=resources||!$('archive-select').value;
   updateNamingControls();
+  updateCaptureGroupControls();
   $('act-success').disabled=active||job?.kind!=='act'||!job?.finished;
   $('act-failure').disabled=$('act-success').disabled;
   $('save-settings').disabled=resources;
@@ -178,6 +181,8 @@ function updatePhase() {
   phaseCard.classList.toggle('error',phase==='ERROR');
   let counter=job?`会话 ${job.id.slice(9,15)}`:'等待配置';
   if(job?.episode!==undefined)counter=`Episode ${job.episode+1}`;
+  if(job?.group_count)counter=`小组 ${job.group_index}/${job.group_count} · 本组已保存 ${job.group_saved||0}/${job.group_requested}`;
+  if(phase==='WAITING_START'&&job?.group_task)$('phase-message').textContent+=' · 本组指令：'+job.group_task;
   if(job?.saved!==undefined)counter+=` · 累计保存 ${job.saved} 条`;
   $('phase-count').textContent=counter;
   if(state.active&&job?.deadline){
@@ -291,8 +296,8 @@ $('hardware-mode').addEventListener('click',()=>handle((async()=>{
 })()));
 $('prepare-record').addEventListener('click',()=>handle((async()=>{
   const plan=await captureNaming(),{root,existing}=plan;
-  const episode_tasks=$('record-tasks').value.trim()?$('record-tasks').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean):[];
-  await startJob('record',{capture_mode:plan.mode,parent:plan.parent,dataset_root:root,dataset_spec:plan.spec,task:$('record-task').value,episode_tasks,episodes:Number($('record-count').value),record_seconds:Number($('record-duration').value),reset_seconds:Number($('reset-duration').value),group:$('record-group').value,append_confirmed:existing});
+  const instruction_groups=captureGroupPlan();
+  await startJob('record',{capture_mode:plan.mode,parent:plan.parent,dataset_root:root,dataset_spec:plan.spec,task:$('record-task').value,instruction_groups,episodes:Number($('record-count').value),record_seconds:Number($('record-duration').value),reset_seconds:Number($('reset-duration').value),group:$('record-group').value,append_confirmed:existing});
 })()));
 $('prepare-teleop').addEventListener('click',()=>handle(startJob('teleop')));
 $('control-teleop').addEventListener('click',()=>handle(startJob('teleop')));
@@ -329,6 +334,7 @@ for(const [id,success] of [['act-success',true],['act-failure',false]])$(id).add
 async function refreshDatasets(){
   const items=await api('/api/datasets'),previous=$('dataset-select').value;
   datasetItems=sortDatasetItems(items);
+  const collections=await api('/api/capture-collections');captureCollections=Array.isArray(collections)?collections:[];
   if(previous&&datasetItems.some(d=>d.root===previous))revealDatasetChoice(previous);
   else{renderDatasetChoices();if(library)await openDataset('');}
   const archives=await api('/api/archives'), archiveSelect=$('archive-select');
@@ -640,6 +646,7 @@ async function loadStartPose(path){
   $('reset-source').textContent=pose.source_dataset?`当前起点来源：${pose.source_dataset}，第 ${pose.source_episode_zero_based+1} 条实测首帧。不是舵机中位。`:'当前起点来源：'+pose.source+'。保存目标不代表复位路径已通过碰撞验证。';
 }
 installDatasetPicker();
+installCaptureGroupPlan();
 installResetSettings();
 installFeedbackHistory();
 installJointControls();

@@ -42,10 +42,10 @@
               <h2>采集计划</h2><label>采集方式<select id="record-target-mode"><option value="new">新建数据集</option><option value="existing">补录到已有数据集</option></select></label>
               <label id="record-parent-label">数据集父目录<div class="input-with-button"><input id="record-parent" spellcheck="false"><button id="record-parent-browse" class="button subtle" type="button">选择…</button></div></label>
               <select id="record-existing" class="hidden" aria-label="选择补录的原始数据集"></select>
-              <label>默认语言指令 / 任务描述<textarea id="record-task" rows="2">把娃娃放进盒子</textarea></label><details class="task-overrides"><summary>逐条语言指令（可选）</summary><label>每行对应一条；留空则全部沿用默认指令<textarea id="record-tasks" rows="3" placeholder="把娃娃放进盒子&#10;把布块放进盒子"></textarea></label></details>
+              <label>默认语言指令（不分组时使用）<textarea id="record-task" rows="2">把娃娃放进盒子</textarea></label><details id="record-groups-plan" class="task-overrides"><summary>按语言指令分组（可选）</summary></details>
               <label>场景变化描述<input id="record-group" list="scene-descriptions" placeholder="例如：娃娃位置变化，盒子固定"></label><datalist id="scene-descriptions"><option value="固定位置"></option><option value="娃娃位置变化"></option><option value="盒子位置变化"></option><option value="娃娃和盒子位置变化"></option></datalist>
               <div id="record-name-form"></div><label>本次写入目录<div class="input-with-button"><input id="record-root" readonly aria-label="采集数据集目录"><button id="record-browse" class="button subtle" title="选择补录对象">选已有</button></div></label>
-              <div class="form-grid"><label>本次条数<input id="record-count" type="number" min="1" max="30" value="5"></label><label>录制上限 / 秒<input id="record-duration" type="number" min="1" max="120" value="30"></label><label>复位时间 / 秒<input id="reset-duration" type="number" min="1" max="120" value="20"></label><label>格式<input value="LeRobot v3 · H.264" readonly></label></div>
+              <div class="form-grid"><label>本次总条数（分组自动合计）<input id="record-count" type="number" min="1" max="30" value="5"></label><label>录制上限 / 秒<input id="record-duration" type="number" min="1" max="120" value="30"></label><label>复位时间 / 秒<input id="reset-duration" type="number" min="1" max="120" value="20"></label><label>格式<input value="LeRobot v3 · H.264" readonly></label></div>
               <button id="prepare-record" class="button primary full hardware">连接采集设备，先检查画面</button><button id="prepare-teleop" class="button full hardware">启动主从跟随（缓慢同步，不录制）</button><p class="field-help">检查画面后另行点击同步；同步完成后等待手动开始与 3 秒倒计时。整批只同步一次。语言随每条保存，ACT 不使用文本；VLA 可读取 task。</p>
             </section>
               <section class="inspector-section hidden" data-inspector="control">
@@ -81,5 +81,5 @@
 </div>
 <div id="toast" class="toast hidden" role="status"></div>
 <dialog id="confirm-dialog"><form method="dialog"><div class="dialog-icon">!</div><h2 id="confirm-title">确认操作</h2><p id="confirm-text"></p><label class="checkbox-label"><input id="confirm-checkbox" type="checkbox">我已核对上述条件</label><div class="dialog-actions"><button class="button" value="cancel">取消</button><button id="confirm-accept" class="button primary" value="ok" disabled>确认</button></div></form></dialog>
-<script src="/naming.js?build=__SO101_BUILD__" defer></script><script src="/history.js?build=__SO101_BUILD__" defer></script><script src="/joint_control.js?build=__SO101_BUILD__" defer></script><script src="/portable.js?build=__SO101_BUILD__" defer></script><script src="/app.js?build=__SO101_BUILD__" defer></script>
+<script src="/naming.js?build=__SO101_BUILD__" defer></script><script src="/history.js?build=__SO101_BUILD__" defer></script><script src="/joint_control.js?build=__SO101_BUILD__" defer></script><script src="/portable.js?build=__SO101_BUILD__" defer></script><script src="/capture_groups.js?build=__SO101_BUILD__" defer></script><script src="/app.js?build=__SO101_BUILD__" defer></script>
 </body></html>

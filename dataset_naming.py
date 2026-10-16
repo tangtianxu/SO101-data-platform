@@ -51,6 +51,8 @@ def capture_plan(cfg, request):
     parent=robot_path(request.get('parent') or cfg['dataset_home'],existing=True)
     if not parent.is_dir() or parent.is_symlink():
         raise ValueError('请选择 E 盘的实际数据集父目录')
+    if any((p/'.capture-groups.json').is_file() for p in (parent,*parent.parents)):
+        raise ValueError('已有分组采集目录内不能嵌套新建；请补录该总文件夹，或选择外部数据集父目录')
     for record in registry()['datasets'].values():
         root=Path(record['root'])
         if parent==root or parent.is_relative_to(root):

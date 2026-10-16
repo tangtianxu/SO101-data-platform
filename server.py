@@ -124,40 +124,11 @@ class Platform:
                 raise RuntimeError("请先正常结束独立相机预览，等待相机释放后再启动此任务")
             cfg = self.config.copy()
             payload = dict(request.get("options") or {})
-            create_capture=False
+            create_capture=payload.get('capture_mode')=='new'
+            record_plan=None
             if kind == "record":
-                mode=payload.get('capture_mode')
-                if mode=='new':
-                    plan=capture_plan(cfg,{'parent':payload.get('parent'),'instruction':payload.get('task',cfg['task']),
-                        'description':payload.get('group'),'note':payload.get('note','')})
-                    payload.update(dataset_root=plan['root'],dataset_spec=plan['spec'])
-                    cfg['dataset_home']=plan['parent'];create_capture=True
-                elif mode=='append':
-                    selected=child_folder(cfg,payload.get('dataset_root',''))
-                    cfg['dataset_home']=str(selected.parent)
-                elif mode is not None:
-                    raise ValueError('采集模式只能是新建或补录')
-                root = robot_path(payload.get("dataset_root", ""))
-                if not root.is_relative_to(Path(cfg["dataset_home"]).resolve()) or root == Path(cfg["dataset_home"]).resolve():
-                    raise ValueError("请选择数据集目录内的独立数据集，不可使用数据集总目录")
-                if (root / "meta/info.json").exists() and payload.get("append_confirmed") is not True:
-                    raise ValueError("已有数据集，必须明确确认追加；原文件不删除")
-                if root.exists() and not (root / "meta/info.json").exists() and any(p.name != ".platform-plan.json" for p in root.iterdir()):
-                    raise ValueError("非空目录没有完整数据集元数据，请新建目录，不覆盖残留文件")
-                payload["dataset_root"] = str(root)
-                payload["dataset_spec"] = validate_capture(cfg,root,payload.get("dataset_spec"),payload.get("append_confirmed"))
-                cfg["episodes"] = number(payload.get("episodes", cfg["episodes"]), 1, 30, "条数", True)
-                cfg["record_seconds"] = number(payload.get("record_seconds", cfg["record_seconds"]), 1, 120, "录制时长", True)
-                cfg["reset_seconds"] = number(payload.get("reset_seconds", cfg["reset_seconds"]), 1, 120, "复位时长", True)
-                cfg["task"] = str(payload.get("task", cfg["task"])).strip()
-                if not cfg["task"] or len(cfg["task"]) > 300:
-                    raise ValueError("需要有效的任务描述")
-                payload["group"] = str(payload.get("group", "未分组"))[:100]
-                tasks = payload.get("episode_tasks", [])
-                if not isinstance(tasks, list) or (tasks and len(tasks) != cfg["episodes"]) or any(
-                        not isinstance(t, str) or not t.strip() or len(t) > 300 for t in tasks):
-                    raise ValueError("逐条语言指令应留空，或每条一行且数量与采集条数相同，每条 1–300 字")
-                payload["episode_tasks"] = [t.strip() for t in tasks]
+                from capture_groups import prepare_record
+                record_plan=prepare_record(cfg,payload)
             if kind == "act":
                 cfg["act_seconds"] = number(payload.get("duration", cfg["act_seconds"]), .5, 17.5, "ACT 时限")
                 cfg['task']=str(payload.get('task') or cfg['task']).strip()
@@ -199,9 +170,12 @@ class Platform:
             atomic_json(out / "session.json", {"kind": kind, "config": cfg, "options": payload,
                                               "hardware_access_permitted": kind != "crop", "created": stamp})
             if kind=="record":
-                if create_capture:
+                if record_plan:
+                    from capture_groups import commit_groups
+                    commit_groups(record_plan)
+                elif create_capture:
                     create_dataset(cfg,Path(payload['dataset_root']).name)
-                store_metadata(payload["dataset_root"],payload["dataset_spec"],source="capture_plan")
+                if not record_plan:store_metadata(payload["dataset_root"],payload["dataset_spec"],source="capture_plan")
             job = {"id": stamp, "kind": kind, "phase": "LOADING", "message": "正在准备工作进程",
                         "output": str(out), "started": time.time(), "finished": False}
             if independent_preview:
@@ -314,6 +288,7 @@ class Platform:
                                 job["cameras"] = event["cameras"]
                             elif kind == "saved":
                                 job["saved"] = event["total"]
+                                job.update({k:v for k,v in event.items() if k.startswith('group_')})
                         if kind != "frame":
                             log.write(json.dumps({"type": kind, **event}, ensure_ascii=False) + "\n")
                     except Exception as exc:
@@ -456,6 +431,9 @@ class Platform:
                 spec=validate_spec(request.get("spec"))
                 if request.get("confirmed") is not True:
                     raise ValueError("请确认仅修改名称/分类/备注，不执行处理或改变训练数据")
+                from capture_groups import group_context
+                context=group_context(root)
+                if context and spec.get('instruction')!=context['instruction']:raise ValueError('小组指令固定，不能通过改显示名称改变；描述与备注可单独修改')
                 if spec["review"]=="train":
                     info=root/"meta/info.json"
                     if not info.is_file() or json.loads(info.read_text(encoding="utf-8")).get("total_frames",0)<=0:
@@ -538,6 +516,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(self.app.inventory())
             if url.path == "/api/datasets":
                 return self.json(list_datasets(self.app.config))
+            if url.path == '/api/capture-collections':
+                from capture_groups import collections
+                return self.json(collections(self.app.config))
             if url.path == '/api/feedback':
                 return self.json(feedback_store.history(self.app.config))
             if url.path == "/api/archives":
@@ -563,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not (root / "meta/info.json").is_file() or not file.is_relative_to(root) or file.suffix.lower() != ".mp4":
                     raise PermissionError("只允许读取所选数据集的视频")
                 return self.media(file)
-            assets = {"/": "index.html", "/app.js": "app.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
+            assets = {"/": "index.html", "/app.js": "app.js", "/capture_groups.js":"capture_groups.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
             if url.path not in assets:
                 return self.json({"error": "未找到"}, 404)
             file = HERE / "dist" / assets[url.path]
