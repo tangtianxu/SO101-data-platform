@@ -451,6 +451,53 @@ test('batch controls cannot act on the old library while a different dataset is 
   await assert.rejects(f.run('batchMark("success")'),/加载完成/);assert.equal(f.posted().length,0);
 });
 
+test('select-all delete is one request with no confirmations; deleted view supports batch restore of prior states and notes',async t=>{
+  const f=await batchFixture(t),fetch=f.w.fetch;let saved=JSON.parse(f.run('JSON.stringify(library.annotations)'));
+  f.w.fetch=async(url,options={})=>{
+    if(url==='/api/episodes/archive'){
+      const body=JSON.parse(options.body);f.calls.push({url,body});let changed=0;
+      for(const ep of body.episodes){const row=saved[ep];if(body.action==='delete'&&!row.deleted){row.before_delete_result=row.result;row.result='exclude';row.deleted=true;changed++;}else if(body.action==='restore'&&row.deleted){row.result=row.before_delete_result;delete row.before_delete_result;row.deleted=false;changed++;}}
+      return {ok:true,json:async()=>({annotations:structuredClone(saved),changed,selected:body.episodes.length})};
+    }return fetch(url,options);
+  };
+  f.$('episode-select-all').click();assert.equal(f.$('batch-delete-episodes').disabled,false);f.$('batch-delete-episodes').click();await until(()=>!f.run('batchReviewBusy'));
+  assert.equal(f.posted().length,1);assert.deepEqual(f.posted()[0].body.episodes,[0,1,2]);assert.equal(f.posted()[0].body.action,'delete');
+  assert.equal(f.$('confirm-dialog').open,false);assert.equal(f.$('episode-list').children.length,0);assert.equal(f.run('episodeSelection.size'),0);
+  assert.match(f.$('episode-trash-count').textContent,/3 条/);assert.equal(f.run('library.annotations[1].note'),'note 1');
+  f.$('episode-visibility').value='deleted';f.$('episode-visibility').dispatchEvent(new f.w.Event('change'));
+  assert.equal(f.$('episode-list').children.length,3);f.$('episode-select-all').click();assert.equal(f.$('batch-restore-episodes').disabled,false);
+  assert.equal(f.w.document.querySelector('[data-batch-result="success"]').disabled,true);
+  f.$('batch-restore-episodes').click();await until(()=>!f.run('batchReviewBusy'));
+  assert.equal(f.posted().length,2);assert.equal(f.posted()[1].body.action,'restore');assert.equal(f.run('library.annotations[1].result'),'failure');
+  assert.equal(f.run('library.annotations[1].note'),'note 1');assert.equal(f.$('episode-list').children.length,0);
+  f.$('episode-visibility').value='active';f.$('episode-visibility').dispatchEvent(new f.w.Event('change'));
+  assert.equal(f.$('episode-list').children.length,3);assert.equal(f.calls.some(c=>c.url==='/api/jobs'),false);
+});
+
+test('archive failure keeps selections and annotations; empty, mismatched and active task states cannot dispatch deletion',async t=>{
+  const f=await batchFixture(t);assert.equal(f.$('batch-delete-episodes').disabled,true);
+  f.$('episode-select-all').click();const before=f.run('JSON.stringify(library.annotations)');
+  const fetch=f.w.fetch;f.w.fetch=async(url,options={})=>url==='/api/episodes/archive'?{ok:false,json:async()=>({error:'保存失败，整批未修改'})}:fetch(url,options);
+  f.$('batch-delete-episodes').click();await until(()=>!f.run('batchReviewBusy'));
+  assert.equal(f.run('episodeSelection.size'),3);assert.equal(f.run('JSON.stringify(library.annotations)'),before);assert.match(f.$('toast').textContent,/整批未修改/);
+  f.snapshot.active=true;f.snapshot.resources_active=true;
+  for(const [kind,phase] of [['record','RECORDING'],['record','RESET'],['crop','CROPPING'],['act','RUNNING']]){
+    f.snapshot.job={kind,phase,id:'blocked'};f.render();assert.equal(f.$('batch-delete-episodes').disabled,true);
+  }
+  f.snapshot.job={kind:'record',phase:'PAUSED',id:'paused'};f.render();assert.equal(f.$('batch-delete-episodes').disabled,false);
+  f.run('resetEpisodeSelection("QA/other");updateDatasetBatchControls()');assert.equal(f.$('batch-delete-episodes').disabled,true);
+  await assert.rejects(f.run('batchArchiveEpisodes("delete")'),/加载完成/);assert.equal(f.posted().length,0);
+});
+
+test('changing normal/deleted/all views clears hidden selections and select-all stays within that view',async t=>{
+  const f=await batchFixture(t);f.run('library.annotations[1]={...library.annotations[1],deleted:true,result:"exclude"};renderEpisodeList()');
+  assert.equal(f.$('episode-list').children.length,2);f.$('batch-select-all').click();assert.deepEqual(Array.from(f.run('[...episodeSelection]')),[0,2]);
+  f.$('episode-visibility').value='deleted';f.$('episode-visibility').dispatchEvent(new f.w.Event('change'));assert.equal(f.run('episodeSelection.size'),0);
+  f.$('batch-select-all').click();assert.deepEqual(Array.from(f.run('[...episodeSelection]')),[1]);assert.equal(f.$('batch-delete-episodes').disabled,true);
+  f.$('episode-visibility').value='all';f.$('episode-visibility').dispatchEvent(new f.w.Event('change'));f.$('batch-select-all').click();assert.equal(f.run('episodeSelection.size'),3);
+  assert.equal(f.$('batch-delete-episodes').disabled,false);assert.equal(f.$('batch-restore-episodes').disabled,false);assert.equal(f.calls.length,0);
+});
+
 test('motion analysis requests all successful scope without applying crops automatically',async t=>{
   const f=await batchFixture(t);f.$('batch-auto-trim').click();assert.equal(f.$('motion-trim-dialog').open,true);
   f.$('motion-analyze').click();await until(()=>f.posted().some(c=>c.url==='/api/jobs'));

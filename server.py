@@ -673,6 +673,16 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/api/capture-review':
                 from capture_pause import review_change
                 with self.app.lock:return self.json(review_change(self.app,request))
+            if self.path == '/api/episodes/archive':
+                from review_store import archive_reviews
+                root=child_folder(self.app.config,request.get('root',''))
+                with self.app.lock:
+                    if self.app.active() and not (self.app.job['kind']=='record' and self.app.job['phase']=='PAUSED'):
+                        raise RuntimeError('请先暂停采集或结束当前任务，再批量删除／恢复轨迹')
+                    if request.get('crop_revision')!=review_revision(root):raise ValueError('裁剪集版本已变化，请重新打开后操作')
+                    result=archive_reviews(root,request.get('episodes'),request.get('action'))
+                    self.app.catalog_cache.clear()
+                return self.json(result)
             if self.path == '/api/episode-restore':
                 from review_store import restore_review
                 root=child_folder(self.app.config,request.get('root',''))

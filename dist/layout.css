@@ -129,6 +129,8 @@
 .episode-selection-toolbar input { width:16px;height:16px;margin:0;accent-color:var(--accent); }
 .episode-selection-toolbar .button { margin-left:auto;min-height:27px;padding:4px 8px;font-size:11px; }
 #episode-selected-count { font-size:11px; }
+.episode-visibility { display:grid;gap:6px;padding:10px 12px;margin:0;border-top:1px solid var(--line); }
+.episode-visibility select { margin:0; }
 .motion-settings { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px; }
 .motion-settings label+label { margin-top:0; }
 .motion-tail-option { display:flex;gap:9px;align-items:center; }
