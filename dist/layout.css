@@ -108,6 +108,24 @@
 .dataset-choice-meta,.dataset-choice-note,.dataset-choice-group { font-size:12px;line-height:1.6;color:#65778a;white-space:normal; }
 .dataset-choice-path { font-size:11px;line-height:1.6;color:#8a96a5;white-space:normal; }
 .dataset-browser-empty { padding:24px;text-align:center; }
+.dataset-batch-tools { padding:14px 18px;margin-bottom:18px; }
+.batch-tool-row { display:flex;align-items:center;gap:8px;flex-wrap:wrap; }
+.batch-tool-row+.batch-tool-row { margin-top:9px; }
+.batch-tool-row .button { min-height:31px;padding:6px 10px;font-size:12px; }
+.batch-tool-row #batch-auto-trim { margin-left:auto; }
+.episode-choice-row { display:grid;grid-template-columns:18px minmax(0,1fr);gap:3px;align-items:center; }
+.episode-choice-row>input { width:15px;height:15px;margin:0;accent-color:var(--accent); }
+.episode-choice-row .episode-item { width:100%;min-width:0; }
+.motion-settings { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px; }
+.motion-settings label+label { margin-top:0; }
+.motion-tail-option { display:flex;gap:9px;align-items:center; }
+.motion-tail-option input { width:16px;height:16px;margin:0; }
+.motion-preview-table { margin-top:14px;overflow:auto;max-height:38vh;border:1px solid var(--line);border-radius:7px; }
+.motion-preview-table table { min-width:760px;table-layout:auto; }
+.motion-preview-table thead { position:sticky;top:0;background:#f7f9fb; }
+.motion-preview-table td,.motion-preview-table th { padding:9px 11px;font-size:12px; }
+.motion-preview-table input { width:15px;height:15px;accent-color:var(--accent); }
+@media(max-width:800px){.motion-settings{grid-template-columns:repeat(2,minmax(0,1fr))}.batch-tool-row #batch-auto-trim{margin-left:0}}
 .dataset-info-identity { padding:12px 15px;line-height:1.8;font-size:11px;background:#f4f7fa;border-radius:7px;white-space:pre-line;overflow-wrap:anywhere; }
 .dataset-dialog .library-management { padding:18px 0 0;margin:0; }
 .dataset-dialog .naming-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }

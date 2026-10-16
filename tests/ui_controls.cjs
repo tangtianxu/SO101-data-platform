@@ -41,7 +41,7 @@ async function fixture(t){
     }
     return {ok:true,json:async()=>value};
   };
-  for(const name of ['dataset_browser.js','naming.js','history.js','joint_control.js','portable.js','capture_groups.js','app.js']){
+  for(const name of ['dataset_batch.js','dataset_browser.js','naming.js','history.js','joint_control.js','portable.js','capture_groups.js','app.js']){
     const file=path.join(root,'dist',name);if(!fs.existsSync(file))continue;
     let code=fs.readFileSync(file,'utf8');
     // Suppress only the polling boot line; test the actual installed handlers and all control functions.
@@ -299,6 +299,84 @@ test('new training approval still needs confirmation and cancellation saves noth
   f.run('editNameForm.get("review").value="train";');f.$('save-dataset-label').click();
   await until(()=>f.$('confirm-dialog').open);f.$('confirm-dialog').close('cancel');await pause(0);
   assert.equal(f.posted().some(c=>c.url==='/api/dataset-management'),false);
+});
+
+async function batchFixture(t){
+  const f=await fixture(t),item=dataset('raw-batch','raw','pending',1);loadItems(f,[item]);
+  f.snapshot.active=false;f.snapshot.resources_active=false;f.render();
+  f.w.__library={root:item.root,fps:30,episodes:[0,1,2].map(index=>({index,tasks:['抓娃娃'],duration:10,frames:300})),annotations:{0:{result:'success',note:'note 0'},1:{result:'failure',note:'note 1'},2:{result:'success',note:'note 2'}}};
+  f.run('revealDatasetChoice("QA/raw-batch");resetEpisodeSelection("QA/raw-batch");library=window.__library;renderEpisodeList();updateDatasetBatchControls();');
+  return f;
+}
+
+test('batch episode checkboxes select all or filtered rows without opening videos or commands',async t=>{
+  const f=await batchFixture(t);
+  f.$('batch-select-all').click();assert.equal(f.run('episodeSelection.size'),3);
+  assert.equal(f.$('episode-list').querySelectorAll('input:checked').length,3);
+  f.$('batch-clear').click();assert.equal(f.run('episodeSelection.size'),0);
+  f.input('episode-search','2');f.$('batch-select-filtered').click();
+  assert.deepEqual(Array.from(f.run('[...episodeSelection]')),[1]);
+  assert.match(f.$('batch-selection-count').textContent,/1 \/ 3/);assert.equal(f.posted().length,0);
+  assert.equal(f.$('confirm-dialog').open,false);
+});
+
+test('batch mark posts once without a confirmation dialog and preserves notes',async t=>{
+  const f=await batchFixture(t),fetch=f.w.fetch;
+  f.w.fetch=async(url,opts={})=>{
+    if(url==='/api/annotations/batch'){const body=JSON.parse(opts.body);f.calls.push({url,body});return {ok:true,json:async()=>({changed:body.episodes.length,annotations:{0:{result:body.result,note:'note 0'},1:{result:body.result,note:'note 1'},2:{result:body.result,note:'note 2'}}})};}
+    return fetch(url,opts);
+  };
+  f.$('batch-select-all').click();f.w.document.querySelector('[data-batch-result="exclude"]').click();
+  await until(()=>f.$('toast').textContent.includes('已将 3 条'));
+  assert.equal(f.posted().filter(c=>c.url==='/api/annotations/batch').length,1);
+  assert.equal(f.run('library.annotations[0].note'),'note 0');assert.equal(f.run('library.annotations[1].result'),'exclude');
+  assert.equal(f.$('confirm-dialog').open,false);assert.equal(f.calls.some(c=>c.url==='/api/jobs'),false);
+});
+
+test('batch controls cannot act on the old library while a different dataset is loading',async t=>{
+  const f=await batchFixture(t);f.$('batch-select-all').click();
+  f.run('resetEpisodeSelection("QA/next");updateDatasetBatchControls();');
+  assert.equal(f.$('batch-auto-trim').disabled,true);assert.equal(f.$('batch-select-all').disabled,true);
+  await assert.rejects(f.run('batchMark("success")'),/加载完成/);assert.equal(f.posted().length,0);
+});
+
+test('motion analysis requests all successful scope without applying crops automatically',async t=>{
+  const f=await batchFixture(t);f.$('batch-auto-trim').click();assert.equal(f.$('motion-trim-dialog').open,true);
+  f.$('motion-analyze').click();await until(()=>f.posted().some(c=>c.url==='/api/jobs'));
+  const job=f.posted().find(c=>c.url==='/api/jobs').body;
+  assert.equal(job.kind,'crop');assert.equal(job.options.mode,'motion_preview');assert.equal(job.options.episodes,null);
+  assert.equal(job.options.settings.arm_delta,.5);assert.equal(job.options.settings.gripper_delta,1);
+  assert.equal(f.posted().filter(c=>c.url==='/api/jobs').length,1);assert.equal(f.$('motion-apply').disabled,true);
+  await until(()=>f.run('requestBusy')===false);await pause(0);
+});
+
+test('preview selects only ready rows and batch apply uses that exact source plan',async t=>{
+  const f=await batchFixture(t);
+  f.w.__plan={dataset_root:'QA/raw-batch',rows:[{episode:0,status:'ready',start:1,end:9,duration:10,reason:'建议'}, {episode:2,status:'skip',duration:10,reason:'未检出持续运动'}]};
+  f.run('motionPreview=window.__plan;motionPreviewJob="preview-1";renderMotionPreview();');
+  assert.equal(f.$('motion-preview-rows').querySelectorAll('input:checked').length,1);
+  assert.equal(f.$('motion-preview-rows').querySelectorAll('input:disabled').length,1);
+  f.$('motion-apply').click();await until(()=>f.posted().some(c=>c.url==='/api/jobs'));
+  const request=f.posted().find(c=>c.url==='/api/jobs').body.options;
+  assert.equal(request.mode,'motion_apply');assert.equal(request.preview_job_id,'preview-1');assert.deepEqual(request.episodes,[0]);
+  assert.equal(f.$('confirm-dialog').open,false);
+  await until(()=>f.run('requestBusy')===false);await pause(0);
+});
+
+test('changing motion parameters invalidates an older preview',async t=>{
+  const f=await batchFixture(t);f.w.__plan={dataset_root:'QA/raw-batch',rows:[{episode:0,status:'ready',start:1,end:9,duration:10,reason:'建议'}]};
+  f.run('motionPreview=window.__plan;motionPreviewJob="preview-1";renderMotionPreview();');
+  f.input('motion-arm_delta',1);
+  assert.equal(f.run('motionPreviewJob'),null);assert.equal(f.$('motion-apply').disabled,true);assert.equal(f.posted().length,0);
+});
+
+test('motion dialog exposes progress and cancellation sends only a stop command',async t=>{
+  const f=await batchFixture(t);
+  f.snapshot.active=true;f.snapshot.resources_active=true;f.snapshot.job={id:'crop-preview',kind:'crop',phase:'MOTION_ANALYZING',message:'只读分析'};
+  f.snapshot.telemetry={analysis_done:2,analysis_total:3};f.render();
+  assert.equal(f.$('motion-stop').disabled,false);assert.match(f.$('motion-job-status').textContent,/2\/3/);
+  f.$('motion-stop').click();await pause(0);
+  assert.equal(f.posted().length,1);assert.equal(f.posted()[0].url,'/api/command');assert.equal(f.posted()[0].body.command,'stop');
 });
 
 function addGroup(f,task,count){

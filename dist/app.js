@@ -19,6 +19,8 @@ let lastPreview=null, operationEpoch=0;
 const frameBusy = {top:false, wrist:false}, frameUrls = {}, frameJob = {};
 phaseNames.JOINT_MOVING='关节目标执行中';
 phaseNames.GROUP_CATCHUP='本组开始已排队 · 等待低速跟随追平';
+phaseNames.MOTION_ANALYZING='分析运动边界（只读）';
+Object.assign(phaseNames,{CROP_MERGING:'合并裁剪集',CROP_VERIFYING:'校验裁剪集',CROP_PUBLISHING:'提交裁剪集'});
 
 async function api(path, body) {
   if(body!==undefined&&runtimeMismatch&&!(path==='/api/command'&&['stop','stop_preview','stop_device'].includes(body.command)))throw Error('窗口与后台版本不同，请正常停止后重开正式入口');
@@ -153,6 +155,7 @@ function updateControls() {
   $('restore-dataset').disabled=resources||!lastArchive;
   $('restore-selected').disabled=resources||!$('archive-select').value;
   updateNamingControls();
+  updateDatasetBatchControls();
   updateCaptureGroupControls();
   $('act-success').disabled=active||job?.kind!=='act'||!job?.finished;
   $('act-failure').disabled=$('act-success').disabled;
@@ -184,15 +187,19 @@ function updatePhase() {
   if(job?.group_count)counter=`小组 ${job.group_index}/${job.group_count} · 本组已保存 ${job.group_saved||0}/${job.group_requested}`;
   if(phase==='WAITING_START'&&job?.group_task)$('phase-message').textContent+=' · 本组指令：'+job.group_task;
   if(job?.saved!==undefined)counter+=` · 累计保存 ${job.saved} 条`;
+  if(job?.batch_count)counter=`批量裁剪 ${job.batch_index}/${job.batch_count}`;
   $('phase-count').textContent=counter;
   if(state.active&&job?.deadline){
     const left=Math.max(0,job.deadline-Date.now()/1000);
     $('phase-time').textContent=left.toFixed(1)+' s';
   }else if(state.active&&phase==='CROPPING'&&state.telemetry.crop_total){
     $('phase-time').textContent=`${state.telemetry.crop_done} / ${state.telemetry.crop_total} 帧`;
+  }else if(state.active&&phase==='MOTION_ANALYZING'){
+    $('phase-time').textContent=`${state.telemetry.analysis_done||0} / ${state.telemetry.analysis_total||'—'} 条`;
   }else{$('phase-time').textContent=state.telemetry?.effective_hz?state.telemetry.effective_hz.toFixed(1)+' Hz':'—';}
   const maximum=phase==='RECORDING'?Number($('record-duration').value):phase==='RESET'?Number($('reset-duration').value):3;
   $('phase-progress').value=state.active&&job?.deadline?Math.max(0,Math.min(1,1-(job.deadline-Date.now()/1000)/maximum)):state.active&&phase==='CROPPING'?((state.telemetry.crop_done||0)/(state.telemetry.crop_total||1)):0;
+  if(state.active&&phase==='MOTION_ANALYZING')$('phase-progress').value=(state.telemetry.analysis_done||0)/(state.telemetry.analysis_total||1);
 }
 async function poll() {
   if(pollBusy)return;pollBusy=true;
@@ -220,9 +227,12 @@ async function poll() {
       if(next.job.kind==='act')handle(refreshFeedback());
       if(next.job.phase==='ERROR')toast(next.job.message,true);
       if(next.job.kind==='crop'&&next.job.result?.outcome==='cropped'){
-        toast(`裁剪集已更新，共 ${next.job.result.total_crops} 条；${next.job.result.replaced?'已替换原来的裁剪结果':'原始轨迹未修改'}。`);handle((async()=>{const root=library?.root,index=selectedEpisode?.index;await refreshDatasets();if(root===library?.root&&index!==undefined)await selectEpisode(index);})());
+        toast(`本次保存 ${next.job.result.processed_count||1} 条，裁剪集共 ${next.job.result.total_crops} 条；原始轨迹未修改。`);handle((async()=>{const root=library?.root,index=selectedEpisode?.index;await refreshDatasets();if(root===library?.root&&index!==undefined)await selectEpisode(index);})());
       }
     }
+    handle(observeMotionJob(lastJob,next));
+    if(next.active&&next.job.phase==='MOTION_ANALYZING')$('task-state').textContent=`运动分析 ${next.telemetry.analysis_done||0} / ${next.telemetry.analysis_total||'—'} 条（不写数据）`;
+    if(next.active&&next.job.batch_count)$('task-state').textContent=`批量裁剪 ${next.job.batch_index}/${next.job.batch_count} · ${next.telemetry.crop_done||0}/${next.telemetry.crop_total||'—'} 帧`;
     lastJob=next.job?{id:next.job.id,active:next.active}:null;
     if(lastPreview?.active&&next.preview_job?.id===lastPreview.id&&!next.preview_active&&next.preview_job.phase==='ERROR')toast('相机预览异常：'+next.preview_job.message,true);
     lastPreview=next.preview_job?{id:next.preview_job.id,active:next.preview_active}:null;
@@ -363,6 +373,7 @@ $('refresh-datasets').addEventListener('click',()=>handle(refreshDatasets().then
 $('dataset-select').addEventListener('change',()=>handle(openDataset($('dataset-select').value)));
 async function openDataset(root){
   if(root&&!revealDatasetChoice(root))throw Error('该数据集已不在列表中，请刷新列表');
+  resetEpisodeSelection(root);
   pausePlayback(); selectedEpisode=null;cropPlan=null;
   if(!root){library=null;renderEpisodeList();$('dataset-summary').textContent='尚未打开数据集';renderDatasetNaming(null);$('episode-content').classList.add('hidden');$('dataset-empty').classList.remove('hidden');return;}
   const item=datasetItems.find(d=>d.root===root);
@@ -376,15 +387,16 @@ async function openDataset(root){
   renderEpisodeList();if(loaded.episodes.length)await selectEpisode(loaded.episodes[0].index);
 }
 function renderEpisodeList(){
-  const list=$('episode-list'),search=$('episode-search').value.toLowerCase();list.replaceChildren();
-  (library?.episodes||[]).filter(e=>`${e.index+1} ${e.tasks.join(' ')}`.toLowerCase().includes(search)).forEach(e=>{
+  const list=$('episode-list');list.replaceChildren();
+  filteredEpisodes().forEach(e=>{
     const button=document.createElement('button');button.className='episode-item'+(selectedEpisode?.index===e.index?' selected':'');
     const number=document.createElement('span');number.className='episode-number';number.textContent=String(e.index+1).padStart(2,'0');
     const detail=document.createElement('div');detail.className='episode-info';const title=document.createElement('strong');title.textContent=e.source_episode!==undefined?`原始第 ${e.source_episode+1} 条 · 裁剪版`:`Episode ${e.index+1}`;
     const subtitle=document.createElement('span');subtitle.textContent=`${e.duration.toFixed(2)} s · ${e.frames} 帧`;detail.append(title,subtitle);
     const mark=document.createElement('span');mark.className='episode-mark';mark.textContent={success:'✓',failure:'失败',exclude:'排除'}[library.annotations?.[e.index]?.result]||'';
-    button.append(number,detail,mark);button.addEventListener('click',()=>handle(selectEpisode(e.index)));list.append(button);
+    button.append(number,detail,mark);button.addEventListener('click',()=>handle(selectEpisode(e.index)));list.append(episodeChoiceRow(button,e));
   });
+  updateDatasetBatchControls();
 }
 $('episode-search').addEventListener('input',renderEpisodeList);
 let selectedLoad=0;
@@ -414,7 +426,8 @@ async function selectEpisode(index){
 function renderAnnotation(){document.querySelectorAll('[data-result]').forEach(b=>b.classList.toggle('selected',library?.annotations?.[selectedEpisode?.index]?.result===b.dataset.result));}
 async function saveAnnotation(result){
   if(!selectedEpisode)return;
-  library.annotations=await api('/api/annotation',{root:library.root,episode:selectedEpisode.index,result:result||library.annotations?.[selectedEpisode.index]?.result||'unreviewed',note:$('annotation-note').value});
+  library.annotations=await api('/api/annotation',{root:library.root,episode:selectedEpisode.index,result:result||library.annotations?.[selectedEpisode.index]?.result||'unreviewed',note:$('annotation-note').value,crop_revision:library.crop_revision||null});
+  invalidateMotionPreview(library.root);
   renderAnnotation();renderEpisodeList();await syncCropNaming();toast('审核记录已保存，原始版与裁剪版保持一致；未改写轨迹。');
 }
 document.querySelectorAll('[data-result]').forEach(b=>b.addEventListener('click',()=>handle(saveAnnotation(b.dataset.result))));
@@ -646,7 +659,7 @@ async function loadStartPose(path){
   $('reset-pose-note').textContent='角度和夹爪百分比显示两位小数；未编辑的数值仍保留文件原精度，不改写原文件。';
   $('reset-source').textContent=pose.source_dataset?`当前起点来源：${pose.source_dataset}，第 ${pose.source_episode_zero_based+1} 条实测首帧。不是舵机中位。`:'当前起点来源：'+pose.source+'。保存目标不代表复位路径已通过碰撞验证。';
 }
-installDatasetPicker();
+installDatasetPicker();installDatasetBatch();
 installCaptureGroupPlan();
 installResetSettings();
 installFeedbackHistory();

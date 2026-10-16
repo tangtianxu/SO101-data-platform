@@ -12,8 +12,9 @@ def description(key):
     return LABELS.get(short, (short, "原始单位"))
 
 
-def sidecar_signals(root, episode, duration):
-    samples = []
+def read_platform_samples(root, episodes):
+    """Read a batch's platform sidecars once, not once for every episode."""
+    result = {ep:[] for ep in episodes}
     for file in sorted((root / "extras/platform").glob("*.jsonl")):
         with file.open(encoding="utf-8") as stream:
             for line in stream:
@@ -21,9 +22,14 @@ def sidecar_signals(root, episode, duration):
                     row = json.loads(line)
                 except ValueError:
                     continue  # An interrupted final line is not a measured zero.
-                if row.get("episode") == episode and row.get("sample"):
+                if row.get("episode") in result and row.get("sample"):
                     sample = row["sample"]
-                    samples.append((float(row["time"]), sample.get("perf_time"), sample["health"]))
+                    result[row["episode"]].append((float(row["time"]), sample.get("perf_time"), sample["health"]))
+    return result
+
+
+def sidecar_signals(root, episode, duration, *, platform_samples=None):
+    samples = read_platform_samples(root,[episode])[episode] if platform_samples is None else list(platform_samples)
     if samples:
         return health_series(samples, "extras/platform：原始反馈样本；保留真实采样间隔")
     # Only this known dataset is linked to the original recording logs. Never scan arbitrary disk paths.
@@ -57,7 +63,7 @@ def health_series(samples, source):
     result = []
     for key in LABELS:
         times, values, last = [], [], object()
-        for t, stamp, health in sorted(samples):
+        for t, stamp, health in sorted(samples,key=lambda row:row[0]):
             if stamp == last or key not in health:
                 continue
             last = stamp

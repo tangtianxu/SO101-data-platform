@@ -59,6 +59,12 @@ def review_reference(root, episode):
     return root, episode
 
 
+def review_revision(root):
+    root = robot_path(root,existing=True)
+    file = root/COLLECTION_FILE
+    return hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None
+
+
 def save_review(root, episode, result, note=''):
     if result not in ('success', 'failure', 'unreviewed', 'exclude'):
         raise ValueError('未知审核标记')
@@ -66,6 +72,29 @@ def save_review(root, episode, result, note=''):
     notes = read_reviews(source)
     notes[str(source_episode)] = {'result': result, 'note': str(note)[:1000], 'time': datetime.now().isoformat()}
     atomic_json(annotation_path(source), notes)
+    return read_reviews(root)
+
+
+def save_reviews(root, episodes, result):
+    """Validate the whole selection, then atomically mark it; preserve individual notes."""
+    if result not in ("success","failure","unreviewed","exclude"):
+        raise ValueError("未知审核标记")
+    root = robot_path(root,existing=True)
+    collection = read_collection(root)
+    total = len(collection["episodes"]) if collection else json.loads((root/"meta/info.json").read_text(encoding="utf-8"))["total_episodes"]
+    if not isinstance(episodes,list) or not episodes or any(type(ep) is not int or not 0 <= ep < total for ep in episodes) or len(set(episodes)) != len(episodes):
+        raise ValueError("请勾选有效、不重复的轨迹")
+    source = robot_path(collection["source"],existing=True) if collection else root
+    indices = [collection["episodes"][ep]["source_episode"] for ep in episodes] if collection else episodes
+    source_total = json.loads((source/"meta/info.json").read_text(encoding="utf-8"))["total_episodes"]
+    if any(not 0 <= ep < source_total for ep in indices):
+        raise ValueError("原始轨迹映射已变化，不保存部分标记")
+    notes = read_reviews(source)
+    stamp = datetime.now().isoformat()
+    for ep in indices:
+        notes[str(ep)] = {**notes.get(str(ep),{}),"result":result,
+                          "note":notes.get(str(ep),{}).get("note",""),"time":stamp}
+    atomic_json(annotation_path(source),notes)
     return read_reviews(root)
 
 

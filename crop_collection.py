@@ -38,7 +38,9 @@ def plan_crop(cfg, source, episode):
         raise ValueError('同一原始数据集已有多个裁剪集合，请先合并，不再新建')
     if candidates:
         destination, collection = candidates[0]
-        spec = collection['dataset_spec']
+        # Preserve the operator's display identity; changed cuts need a new training review.
+        current = describe(destination).get("simple_spec") or collection["dataset_spec"]
+        spec = {**current,"stage":"processed","review":"pending"}
     else:
         parent = describe(source).get('simple_spec') or simple_defaults(cfg['task'])
         spec = {**parent, 'stage': 'processed', 'review': 'pending', 'description': '成功轨迹裁剪',
@@ -163,14 +165,15 @@ def validate_collection(root, manifest, *, verify_sources=True):
 
 
 def write_signal_snapshot(root, manifest):
-    from signal_tools import sidecar_signals
+    from signal_tools import sidecar_signals, read_platform_samples
     signals = {}
     source = robot_path(manifest['source'], existing=True)
+    samples = read_platform_samples(source,[entry["source_episode"] for entry in manifest["episodes"]])
     for entry in manifest['episodes']:
         origin = entry.get('source_time_origin', entry['source_frame_range_half_open'][0] / entry['fps'])
         duration = entry['frames'] / entry['fps']
         rows = []
-        for signal in sidecar_signals(source, entry['source_episode'], origin + duration):
+        for signal in sidecar_signals(source, entry['source_episode'], origin + duration,platform_samples=samples[entry["source_episode"]]):
             keep = [i for i, t in enumerate(signal['time']) if origin <= t < origin + duration]
             if keep:
                 rows.append({**signal, 'time': [signal['time'][i] - origin for i in keep],
@@ -206,77 +209,106 @@ def publish(staged, destination, manifest, workspace, stop=None):
 
 
 def save_crop(cfg, source, episode, start, end, *, stop=None, progress=None, expected_plan=None):
+    result = save_crops(cfg,source,[{"episode":episode,"start":start,"end":end}],
+                        stop=stop,progress=progress,expected_plan=expected_plan)
+    entry = result.pop("entries")[0]
+    return {**entry,**result,"source_episode":episode}
+
+
+def save_crops(cfg, source, requests, *, stop=None, progress=None, expected_plan=None,
+               on_episode=None, on_stage=None, before_publish=None):
+    """Build all requested clips, then publish one validated collection atomically."""
     from cropping import crop_episode, sha256
     from data_tools import inspect_dataset
-    source = robot_path(source, existing=True)
-    require_success(source, episode)
-    home = robot_path(cfg['dataset_home'], existing=True)
-    with collection_lock(home, source):
-        plan = plan_crop(cfg, source, episode)
+    source = robot_path(source,existing=True)
+    if not isinstance(requests,list) or not requests:
+        raise ValueError("请选择至少一条裁剪轨迹")
+    ids = [r.get("episode") for r in requests]
+    if any(type(ep) is not int for ep in ids) or len(set(ids)) != len(ids):
+        raise ValueError("批量裁剪的轨迹编号重复或无效")
+    requests = sorted(requests,key=lambda r:r["episode"])
+    for ep in ids: require_success(source,ep)
+    home = robot_path(cfg["dataset_home"],existing=True)
+    with collection_lock(home,source):
+        plan = plan_crop(cfg,source,requests[0]["episode"])
         if expected_plan is not None:
-            expected_root=robot_path(expected_plan['destination'])
-            expected_spec=validate_spec(expected_plan['dataset_spec'])
-            if robot_path(expected_plan['source'])!=source or expected_root.parent!=home:
-                raise ValueError('裁剪计划来源或父目录不一致')
-            if plan['exists'] and expected_root!=Path(plan['destination']):
-                raise ValueError('裁剪集合在启动期间发生变化，请刷新后重试')
-            if not plan['exists'] and (expected_root.name!=canonical_name(expected_spec) or expected_spec['stage']!='processed' or expected_spec['review']!='pending'):
-                raise ValueError('裁剪集合命名不符合启动时计划')
-            # Keep the server timestamp if encoder imports cross a minute boundary.
-            plan={**plan,'destination':str(expected_root),'dataset_spec':expected_spec}
-        destination = Path(plan['destination'])
-        workspace = home / ('.pending-crop-update-' + secrets.token_hex(8))
+            expected_root = robot_path(expected_plan["destination"])
+            expected_spec = validate_spec(expected_plan["dataset_spec"])
+            if robot_path(expected_plan["source"]) != source or expected_root.parent != home:
+                raise ValueError("裁剪计划来源或父目录不一致")
+            if plan["exists"] and expected_root != Path(plan["destination"]):
+                raise ValueError("裁剪集合在启动期间发生变化，请刷新后重试")
+            if not plan["exists"] and (expected_root.name != canonical_name(expected_spec) or expected_spec["stage"] != "processed" or expected_spec["review"] != "pending"):
+                raise ValueError("裁剪集合命名不符合启动时计划")
+            plan = {**plan,"destination":str(expected_root),"dataset_spec":expected_spec}
+        destination = Path(plan["destination"])
+        previous = read_collection(destination) if destination.exists() else None
+        retained = [r for r in previous["episodes"] if r["source_episode"] not in ids] if previous else []
+        replaced_ids = sorted(set(ids) & {r["source_episode"] for r in previous["episodes"]}) if previous else []
+        workspace = home / (".pending-crop-update-" + secrets.token_hex(8))
         workspace.mkdir()
         committed = False
         try:
-            new = workspace / 'new'
-            entry = crop_episode(source, new, episode, start, end, stop=stop, progress=progress)
-            entry.pop('destination', None)
-            item = inspect_dataset(new, 0)['selected']
-            entry['video_sha256'] = {key: sha256(new / value['path']) for key, value in item['videos'].items()}
-            previous = read_collection(destination) if destination.exists() else None
-            entries = [r for r in previous['episodes'] if r['source_episode'] != episode] if previous else []
-            before = [r for r in entries if r['source_episode'] < episode]
-            after = [r for r in entries if r['source_episode'] > episode]
-            roots = []
-            if previous and entries:
+            new_entries, parts = [], {}
+            for index, request in enumerate(requests,1):
+                if stop and stop.is_set(): raise InterruptedError("批量裁剪已取消，旧结果未替换")
+                ep = request["episode"]
+                require_success(source,ep)
+                if on_episode: on_episode(index,len(requests),ep)
+                new = workspace / ("new_" + str(ep))
+                entry = crop_episode(source,new,ep,request["start"],request["end"],stop=stop,progress=progress)
+                entry.pop("destination",None)
+                if request.get("automatic_trim"): entry["automatic_trim"] = copy.deepcopy(request["automatic_trim"])
+                item = inspect_dataset(new,0)["selected"]
+                entry["video_sha256"] = {key:sha256(new/value["path"]) for key,value in item["videos"].items()}
+                new_entries.append(entry); parts[ep] = new
+            # Split old retained ranges once, then interleave them with new clips in source order.
+            ordered = sorted([*retained,*new_entries],key=lambda r:r["source_episode"])
+            runs, order, pending = {}, [], []
+            def flush():
+                if pending:
+                    name = "retained_" + str(len(runs))
+                    runs[name] = [row["episode_index"] for row in pending]
+                    order.append(workspace/"retained"/name); pending.clear()
+            for entry in ordered:
+                ep = entry["source_episode"]
+                if ep in parts:
+                    flush(); order.append(parts[ep])
+                else: pending.append(entry)
+            flush()
+            if runs:
                 from lerobot.datasets.dataset_tools import split_dataset
                 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-                dataset = LeRobotDataset('local/crop_collection', root=destination, video_backend='pyav')
-                splits = {name: [r['episode_index'] for r in rows] for name, rows in [('before', before), ('after', after)] if rows}
-                split_dataset(dataset, splits, output_dir=workspace / 'retained')
+                dataset = LeRobotDataset("local/crop_collection",root=destination,video_backend="pyav")
+                split_dataset(dataset,runs,output_dir=workspace/"retained")
                 del dataset
-                __import__('gc').collect()  # Release Arrow file maps before a Windows folder swap.
-            if before:
-                roots.append(workspace / 'retained/before')
-            roots.append(new)
-            if after:
-                roots.append(workspace / 'retained/after')
-            staged = workspace / 'assembled'
-            assemble(roots, staged)
-            manifest = prepare_manifest(source, [*entries, entry], plan['dataset_spec'])
-            atomic_json(staged / COLLECTION_FILE, manifest)
-            write_signal_snapshot(staged, manifest)
-            checks = validate_collection(staged, manifest)
-            require_success(source, episode)  # A changed review during encoding cannot bypass the gate.
-            replaced = plan['replacing']
-            backup = publish(staged, destination, manifest, workspace, stop)
-            # Only a replaced revision needs a durable backup. Appends are already fully preserved in the new output.
+                __import__("gc").collect()
+            if stop and stop.is_set(): raise InterruptedError("批量裁剪已取消，旧结果未替换")
+            staged = workspace/"assembled"
+            if on_stage: on_stage("CROP_MERGING","全部片段已生成，正在合并为同一个裁剪集；尚未提交")
+            assemble(order,staged)
+            manifest = prepare_manifest(source,ordered,plan["dataset_spec"])
+            atomic_json(staged/COLLECTION_FILE,manifest)
+            write_signal_snapshot(staged,manifest)
+            if on_stage: on_stage("CROP_VERIFYING","正在校验视频、数值标签和原始文件；尚未提交")
+            checks = validate_collection(staged,manifest)
+            for ep in ids: require_success(source,ep)
+            if before_publish: before_publish()
+            if on_stage: on_stage("CROP_PUBLISHING","校验通过，正在统一提交裁剪集")
+            backup = publish(staged,destination,manifest,workspace,stop)
             archived = None
-            if backup and replaced:
-                archive = ROBOT_HOME / 'dataset_archive/crop_revisions'
-                archive.mkdir(parents=True, exist_ok=True)
-                archived = archive / (datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + secrets.token_hex(4))
+            if backup and replaced_ids:
+                archive = ROBOT_HOME/"dataset_archive/crop_revisions"
+                archive.mkdir(parents=True,exist_ok=True)
+                archived = archive/(datetime.now().strftime("%Y%m%d_%H%M%S")+"_"+secrets.token_hex(4))
                 backup.rename(archived)
-                atomic_json(archived / 'revision_backup.json', {'restore_to': str(destination), 'source': str(source),
-                            'replaced_source_episode': episode, 'recoverable': True})
-            # The host registers display metadata after a successful worker report.
-            # The manifest also keeps the result recoverable if the host exits.
+                atomic_json(archived/"revision_backup.json",{"restore_to":str(destination),"source":str(source),
+                    "replaced_source_episodes":replaced_ids,
+                    "replaced_source_episode":replaced_ids[0] if len(replaced_ids)==1 else None,"recoverable":True})
             committed = True
-            return {**entry, 'outcome': 'cropped', 'destination': str(destination), 'replaced': replaced,
-                    'source_episode': episode, 'total_crops': len(manifest['episodes']), 'checks': checks,
-                    'previous_revision_backup': str(archived) if archived else None}
+            return {"outcome":"cropped","destination":str(destination),"replaced":bool(replaced_ids),
+                    "processed_count":len(new_entries),"processed_episodes":sorted(ids),"replaced_episodes":replaced_ids,
+                    "total_crops":len(manifest["episodes"]),"checks":checks,"entries":new_entries,
+                    "previous_revision_backup":str(archived) if archived else None}
         finally:
-            # On a failed build leave the checked old destination untouched and retain diagnostic staging.
-            if committed:
-                remove_workspace(workspace)
+            if committed: remove_workspace(workspace)

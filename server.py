@@ -30,7 +30,7 @@ import joint_control
 import software_limits
 from app_identity import Deployment
 from crop_collection import plan_crop
-from review_store import read_collection, read_reviews, require_success, save_review
+from review_store import read_collection, read_reviews, require_success, save_review, save_reviews, review_revision
 
 PREFIX = "SO101_EVENT "
 KINDS = {"preview", "camera_scan", "monitor", "control", "teleop", "record", "act", "replay", "crop"}
@@ -147,24 +147,15 @@ class Platform:
                 payload["dataset_root"] = str(robot_path(payload.get("dataset_root", ""), existing=True))
                 payload["episode"] = number(payload.get("episode", -1), 0, 100000, "episode", True)
             if kind == "crop":
-                source = robot_path(payload.get("dataset_root", ""), existing=True)
-                source_episode=number(payload.get("episode", -1), 0, 100000, "episode", True)
-                require_success(source, source_episode)
-                planned=plan_crop(cfg,source,source_episode)
-                if payload.get('destination') and robot_path(payload['destination'])!=Path(planned['destination']):
-                    raise ValueError('裁剪统一保存到本来源的裁剪集合，不再为单条新建数据集')
-                payload.update(dataset_root=str(source), destination=planned['destination'],
-                    episode=number(payload.get("episode", -1), 0, 100000, "episode", True),
-                    start=number(payload.get("start", -1), 0, 7200, "裁剪起点"),
-                    end=number(payload.get("end", -1), 0, 7200, "裁剪终点"))
-                if payload["start"] >= payload["end"]:
-                    raise ValueError("裁剪终点应大于起点")
-                payload["dataset_spec"]=planned['dataset_spec']
-                payload['crop_plan']=planned
+                from motion_trim import prepare_job
+                payload = prepare_job(cfg,payload,self.job)
             require_capability(cfg, 'preview' if kind=='camera_scan' else kind)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(3)
             out = Path(cfg["log_home"]) / stamp
             out.mkdir(parents=True, exist_ok=False)
+            if kind == "crop":
+                from motion_trim import materialize
+                payload = materialize(payload,out)
             if kind=='act':
                 payload['feedback_root']=feedback_store.allocate(cfg,stamp,out,payload)
             atomic_json(out / "session.json", {"kind": kind, "config": cfg, "options": payload,
@@ -282,6 +273,10 @@ class Platform:
                                     job.update(phase="FINISHED", message="裁剪集合已更新；同一原轨迹仅保留一份，原始数据未修改" if job["kind"] == "crop" and event.get("outcome") == "cropped" else "会话结束；请查看结果，退出不自动释放力矩")
                                     if job["kind"] == "preview":
                                         job["message"] = "相机预览已关闭；未连接机械臂，也未改变力矩"
+                                    if job["kind"] == "crop" and event.get("outcome") == "motion_preview":
+                                        job["message"] = "运动边界分析完成，请查看建议区间；尚未写入裁剪集"
+                                    if job["kind"] == "crop" and event.get("outcome") == "operator_stopped":
+                                        job["message"] = event.get("message","已取消；未提交的整批未替换旧裁剪集")
                                     if event.get("torque_released") is True:
                                         job["message"] = "已确认从臂力矩关闭；请保持可靠支撑"
                             elif kind == "cameras":
@@ -397,6 +392,7 @@ class Platform:
         result["annotations"] = self.annotations(root)
         result["naming"] = describe(root)
         result['crop_collection']=read_collection(root)
+        result["crop_revision"]=review_revision(root)
         if result['crop_collection']:
             mapping={row['episode_index']:row for row in result['crop_collection']['episodes']}
             for ep in result['episodes']:
@@ -529,6 +525,11 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/crop-plan':
                 episode=number(query.get('episode',-1),0,100000,'episode',True)
                 return self.json(plan_crop(self.app.config,query['root'],episode))
+            if url.path == '/api/motion-trim-plan':
+                from motion_trim import read_preview
+                with self.app.lock:
+                    plan = read_preview(self.app.job,query.get("job_id"))
+                return self.json({key:value for key,value in plan.items() if key != "evidence"})
             if url.path.startswith("/frame/"):
                 name = url.path.rsplit("/", 1)[-1]
                 with self.app.lock:
@@ -544,7 +545,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not (root / "meta/info.json").is_file() or not file.is_relative_to(root) or file.suffix.lower() != ".mp4":
                     raise PermissionError("只允许读取所选数据集的视频")
                 return self.media(file)
-            assets = {"/": "index.html", "/app.js": "app.js", "/dataset_browser.js":"dataset_browser.js", "/capture_groups.js":"capture_groups.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
+            assets = {"/": "index.html", "/app.js": "app.js", "/dataset_batch.js":"dataset_batch.js", "/dataset_browser.js":"dataset_browser.js", "/capture_groups.js":"capture_groups.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
             if url.path not in assets:
                 return self.json({"error": "未找到"}, 404)
             file = HERE / "dist" / assets[url.path]
@@ -643,6 +644,16 @@ class Handler(BaseHTTPRequestHandler):
                     if request.get("confirmed") is not True:
                         raise ValueError("需要确认另存起点；不会读取设备或产生运动")
                     return self.json(save_pose_copy(self.app.config, request.get("positions"), request.get("source_path")))
+            if self.path == "/api/annotations/batch":
+                root = child_folder(self.app.config,request.get("root",""))
+                with self.app.lock:
+                    if self.app.active() and self.app.job["kind"] == "crop":
+                        raise RuntimeError("请等待当前裁剪或分析事务结束，再修改审核状态")
+                    if request.get("crop_revision") != review_revision(root):
+                        raise ValueError("裁剪集版本已变化，请重新打开数据集后标记，避免标错原始轨迹")
+                    notes = save_reviews(root,request.get("episodes"),request.get("result"))
+                    self.app.catalog_cache.clear()
+                return self.json({"annotations":notes,"changed":len(request["episodes"])})
             if self.path == "/api/annotation":
                 root = robot_path(request["root"], existing=True)
                 index = number(request["episode"], 0, 100000, "episode", True)
@@ -651,6 +662,8 @@ class Handler(BaseHTTPRequestHandler):
                 with self.app.lock:
                     if self.app.active() and self.app.job['kind']=='crop':
                         raise RuntimeError('请等待当前裁剪事务完成，再修改成功/失败状态')
+                    if request.get("crop_revision") != review_revision(root):
+                        raise ValueError("裁剪集版本已变化，请重新打开数据集后标记")
                     notes=save_review(root,index,request['result'],request.get('note',''))
                     self.app.catalog_cache.clear()
                 return self.json(notes)

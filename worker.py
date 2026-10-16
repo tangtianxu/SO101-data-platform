@@ -765,13 +765,11 @@ def main():
         elif kind == "replay":
             report = replay(cfg, options, bridge, out)
         elif kind == "crop":
-            from crop_collection import save_crop
-            bridge.state("CROPPING", "离线裁剪，原始数据不变；正在准备编码器")
-            def progress(done, total):
-                bridge.emit("telemetry", crop_done=done, crop_total=total)
-            report = save_crop(cfg, options["dataset_root"], options["episode"],
-                                  options["start"], options["end"], stop=bridge.stop, progress=progress,
-                                  expected_plan=options.get('crop_plan'))
+            from motion_trim import run_job
+            try:
+                report = run_job(cfg,options,bridge,out)
+            except InterruptedError as error:
+                report = {"outcome":"operator_stopped","message":str(error),"original_data_unchanged":True}
         else:
             raise ValueError("未知工作类型")
     except KeyboardInterrupt:
