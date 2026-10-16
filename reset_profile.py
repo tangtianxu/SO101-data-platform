@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import secrets
 
-from common import HERE, NAMES, atomic_json, number, robot_path
+from common import HERE, NAMES, ROBOT_HOME, atomic_json, number, robot_path, input_path, read_calibration
 
 ARM = NAMES[:5]
 
@@ -25,11 +25,11 @@ def effective_speeds(cfg):
 
 
 def inspect_pose(cfg, path=None):
-    path = robot_path(path or cfg["reference_start_pose"], existing=True)
+    path = input_path(path or cfg["reference_start_pose"])
     if not path.is_file() or path.stat().st_size > 128000:
         raise ValueError("请选择有效的任务起点 JSON 文件")
     reference = json.loads(path.read_text(encoding="utf-8"))
-    calibration = json.loads(Path(cfg["calibration"]).read_text(encoding="utf-8"))
+    calibration = read_calibration(cfg["calibration"])
     if reference.get("joint_order") != list(NAMES) or reference.get("calibration_reference") != calibration:
         raise ValueError("任务起点与当前标定/关节顺序不一致，不允许直接套用")
     if reference.get("units") != ["degrees"]*5+["gripper_percent"]:
@@ -53,19 +53,19 @@ def inspect_pose(cfg, path=None):
 def save_pose_copy(cfg, positions, source_path=None):
     if not isinstance(positions, dict) or set(positions) != set(NAMES):
         raise ValueError("起点必须包含完整六关节位置")
-    source = inspect_pose(cfg, source_path)
-    calibration = json.loads(Path(cfg["calibration"]).read_text(encoding="utf-8"))
+    source = inspect_pose(cfg, source_path) if (source_path or cfg.get("reference_start_pose")) else None
+    calibration = read_calibration(cfg["calibration"])
     # Build a new task preset; never overwrite the existing reference/calibration or claim
     # these edited coordinates still originate from an expert demonstration frame.
     reference = {"status": "application task-start preset, not servo midpoint or factory home",
         "source": "operator_ui_position_editor", "created": datetime.now().isoformat(),
         "joint_order": list(NAMES), "units": ["degrees"]*5+["gripper_percent"],
         "calibration_reference": calibration, "normalized_position": positions,
-        "previous_preset": source["path"], "collision_checked": False,
+        "previous_preset": source["path"] if source else None, "collision_checked": False,
         "requires_operator_route_confirmation": True}
     for n in NAMES:
         c=calibration[n];span=(c["range_max"]-c["range_min"])*180/4095
         number(positions[n], *((0,100) if n=="gripper" else (-span,span)), n+" 起点")
-    path=HERE/"state/start_poses"/(datetime.now().strftime("%Y%m%d_%H%M%S")+"_"+secrets.token_hex(3)+".json")
+    path=ROBOT_HOME/"config/start_poses"/(datetime.now().strftime("%Y%m%d_%H%M%S")+"_"+secrets.token_hex(3)+".json")
     atomic_json(path,reference)
     return inspect_pose(cfg,path)

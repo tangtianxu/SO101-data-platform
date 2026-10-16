@@ -21,7 +21,7 @@ import time
 from urllib.parse import parse_qs, quote, urlparse
 import webbrowser
 
-from common import HERE, atomic_json, environment, load_config, number, robot_path, validate_config
+from common import HERE, STATE_DIR, ROBOT_HOME, atomic_json, environment, load_config, number, robot_path, validate_config, input_path, ensure_workspace, capabilities, require_capability, read_calibration
 from dataset_library import archive_dataset, child_folder, create_dataset, list_archives, list_datasets, restore_dataset
 from reset_profile import inspect_pose, save_pose_copy
 from dataset_naming import DOMAINS, TASKS, PURPOSES, STAGES, REVIEWS, defaults, describe, preview_name, store_metadata, suggest_name, validate_capture, validate_spec, simple_defaults, capture_plan
@@ -42,6 +42,8 @@ class Platform:
         self.lock = threading.RLock()
         self.write_lock = threading.Lock()
         self.config = load_config()
+        ensure_workspace(self.config)
+        self.restart_required = False
         self.deployment=Deployment()
         self.token = secrets.token_urlsafe(32)
         self.proc = None
@@ -97,9 +99,12 @@ class Platform:
                     "telemetry": self.telemetry, "events": list(self.events),
                     "frames": {k: v[1] for k, v in self.frames.items()},
                     "disk_free_gb": round(disk.free / 1073741824, 1), "memory": memory,
-                    "project": str(HERE), "offline": self.offline,"identity":self.deployment.identity()}
+                    "project": str(HERE), "offline": self.offline,"identity":self.deployment.identity(),
+                    "restart_required": self.restart_required, "capabilities": capabilities(self.config)}
 
     def start(self, request):
+        if self.restart_required:
+            raise RuntimeError('工作区或服务端口已变更，请先关闭并重新打开平台')
         kind = request.get("kind")
         if kind not in KINDS:
             raise ValueError("未知操作")
@@ -159,12 +164,12 @@ class Platform:
                 if not cfg['task'] or len(cfg['task'])>300:raise ValueError('ACT 任务描述应为 1–300 字')
                 payload['group']=str(payload.get('group') or '固定位置').strip()[:100]
                 if "reference_start_pose" in payload:
-                    cfg["reference_start_pose"] = str(robot_path(payload["reference_start_pose"], existing=True))
+                    cfg["reference_start_pose"] = str(input_path(payload["reference_start_pose"]))
             if kind == "control" and payload.get("initial_command") is not None:
                 if payload["initial_command"] not in ("hold", "release", "reset") or payload.get("confirmed") is not True:
                     raise ValueError("控制快捷入口需要明确确认保持、支撑释放或完整复位路线")
                 if "reference_start_pose" in payload:
-                    cfg["reference_start_pose"] = str(robot_path(payload["reference_start_pose"], existing=True))
+                    cfg["reference_start_pose"] = str(input_path(payload["reference_start_pose"]))
             if kind == "act" or (kind == "control" and payload.get("initial_command") == "reset"):
                 inspect_pose(cfg)  # File/coordinate checks only, before spawning any hardware owner.
             if kind == "replay":
@@ -185,6 +190,7 @@ class Platform:
                     raise ValueError("裁剪终点应大于起点")
                 payload["dataset_spec"]=planned['dataset_spec']
                 payload['crop_plan']=planned
+            require_capability(cfg, 'preview' if kind=='camera_scan' else kind)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(3)
             out = Path(cfg["log_home"]) / stamp
             out.mkdir(parents=True, exist_ok=False)
@@ -211,7 +217,7 @@ class Platform:
             proc = None
             try:
                 proc = subprocess.Popen([cfg["python"], "-s", "-B", "-u", "-X", "utf8",
-                                              str(HERE / "worker.py")], cwd=HERE, env=environment(),
+                                              str(HERE / "worker.py")], cwd=HERE, env=environment(cfg),
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace", bufsize=1, creationflags=creationflags)
                 if independent_preview:
@@ -230,6 +236,44 @@ class Platform:
             threading.Thread(target=self._read, args=(proc, job, out), daemon=True).start()
             self.log("info", f"启动 {kind}，PID {proc.pid}；设备只由此工作进程持有")
             return job.copy()
+
+    def save_config(self, request):
+        with self.lock:
+            if self.resources_active():
+                raise RuntimeError('设备或导出会话运行中不能修改配置')
+            raw = dict(request)
+            confirmed = raw.pop('_binding_confirmed', False)
+            binding = ('leader_usb_serial','follower_usb_serial','leader_port','follower_port','calibration','leader_calibration')
+            changed = any(raw.get(k,self.config[k]) != self.config[k] for k in binding)
+            if changed and confirmed is not True:
+                raise ValueError('更换设备身份或标定需要明确确认；保存不会连接设备')
+            if raw.get('calibration',self.config['calibration']) != self.config['calibration']:
+                raw.update(manual_joint_limits={},manual_limits_calibration_id=None)
+                if raw.get('reference_start_pose',self.config['reference_start_pose']) == self.config['reference_start_pose']:
+                    raw['reference_start_pose']=''
+            cfg = validate_config({**self.config,**raw})
+            for key in ('calibration','leader_calibration'):
+                if cfg[key]:read_calibration(cfg[key])
+            if cfg['reference_start_pose']:inspect_pose(cfg)
+            restart = any(cfg[k] != self.config[k] for k in ('workspace_root','server_port'))
+            atomic_json(STATE_DIR/'config_history'/('before_'+str(time.time_ns())+'.json'),self.config)
+            atomic_json(STATE_DIR/'settings.json',cfg)
+            self.restart_required = restart
+            if not restart:
+                ensure_workspace(cfg)
+                self.config = cfg
+                self.catalog_cache.clear()
+            self.log('info','配置已保存；需关闭并重新打开平台后启用新工作区/端口' if restart else '配置已保存，未连接或移动设备')
+            return {**cfg,'_restart_required':restart}
+
+    def inventory(self, ports=False):
+        python=input_path(self.config['python'])
+        process=subprocess.run([str(python),'-s','-B','-X','utf8',str(HERE/'device_inventory.py')]+(['--ports'] if ports else []),
+            cwd=HERE,env=environment(self.config),capture_output=True,text=True,encoding='utf-8',timeout=20,
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        if process.returncode:
+            raise ValueError('所选 Python 缺少依赖或检查失败；请先配置 LeRobot 环境：'+process.stderr[-800:])
+        return json.loads(process.stdout)
 
     def _read(self, proc, job, out):
         with (out / "console.log").open("a", encoding="utf-8") as log:
@@ -486,12 +530,12 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == '/api/joint-control-profile':
                 return self.json(joint_control.profile(self.app.config))
             if url.path == "/api/ports":
-                if self.app.offline:
-                    return self.json([])
-                from serial.tools.list_ports import comports
-                return self.json([{"port": p.device, "name": p.description, "serial": p.serial_number,
-                    "role": next((k.split("_")[0] for k, v in self.app.config.items()
-                                  if k.endswith("usb_serial") and v == p.serial_number), "其他")} for p in comports()])
+                ports=self.app.inventory(ports=True)
+                for port in ports:
+                    port['role']=next((role for role in ('leader','follower') if port['serial'] and port['serial']==self.app.config[role+'_usb_serial']),'其他')
+                return self.json(ports)
+            if url.path == '/api/environment':
+                return self.json(self.app.inventory())
             if url.path == "/api/datasets":
                 return self.json(list_datasets(self.app.config))
             if url.path == '/api/feedback':
@@ -519,7 +563,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not (root / "meta/info.json").is_file() or not file.is_relative_to(root) or file.suffix.lower() != ".mp4":
                     raise PermissionError("只允许读取所选数据集的视频")
                 return self.media(file)
-            assets = {"/": "index.html", "/app.js": "app.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
+            assets = {"/": "index.html", "/app.js": "app.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
             if url.path not in assets:
                 return self.json({"error": "未找到"}, 404)
             file = HERE / "dist" / assets[url.path]
@@ -580,6 +624,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("请求体大小无效")
             request = json.loads(self.rfile.read(length))
             is_stop=self.path=='/api/command' and request.get('command') in ('stop','stop_preview','stop_device')
+            if self.app.restart_required and self.path!='/api/shutdown' and not is_stop:
+                raise RuntimeError('配置变更需要重启，当前只允许停止或正常关闭')
             if self.path in ('/api/jobs','/api/hardware-mode','/api/command','/api/manual-limits') and not is_stop and self.headers.get('X-SO101-Build')!=self.app.deployment.build:
                 raise PermissionError('缺少匹配的界面构建标识，拒绝混合版本操作；停止请求仍可使用')
             if self.path == "/api/jobs":
@@ -606,15 +652,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.app.command(request)
                 return self.json({"accepted": True, "note": "已请求，完成状态以后台反馈为准"})
             if self.path == "/api/config":
-                with self.app.lock:
-                    if self.app.resources_active():
-                        raise RuntimeError("设备会话运行中不能修改配置")
-                    cfg = validate_config(request)
-                    inspect_pose(cfg)
-                    atomic_json(HERE / "state/settings.json", cfg)
-                    self.app.config = cfg
-                self.app.log("info", "配置已保存到 E 盘；未连接设备")
-                return self.json(cfg)
+                return self.json(self.app.save_config(request))
             if self.path == '/api/manual-limits':
                 return self.json(self.app.save_manual_limits(request))
             if self.path == "/api/reset-profile":
@@ -678,24 +716,24 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     environment()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8791)
+    parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--offline", action="store_true", help="Lock every hardware entry; dataset review/crop remain available")
     args = parser.parse_args()
     if not sys.flags.no_user_site:
-        raise SystemExit("请通过 launch.cmd 使用隔离的 E 盘解释器启动")
+        raise SystemExit("请通过 launch.cmd 或使用隔离环境的 Python 加 -s 参数启动")
     app = Platform(offline=args.offline)
     if args.check:
         print(json.dumps({"configuration": "passed", "hardware_accessed": False,
                           "python": sys.executable, "no_extra_dependencies": True}, ensure_ascii=False))
         return
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        server = ThreadingHTTPServer(("127.0.0.1", args.port if args.port is not None else app.config['server_port']), Handler)
     except OSError:
         raise SystemExit(f"端口 {args.port} 已使用；若平台已打开请回到原窗口，不重复启动")
     server.app = app
-    url = f"http://127.0.0.1:{args.port}/"
+    url = f"http://127.0.0.1:{server.server_port}/"
     print("SO101 数采平台 · " + url + "\n未连接硬件；关闭前请先在界面停止设备会话。", flush=True)
     if not args.no_browser:
         webbrowser.open(url)

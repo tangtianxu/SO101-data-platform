@@ -73,6 +73,7 @@ function populateConfig(cfg) {
   const map={'cfg-top':'top_camera','cfg-wrist':'wrist_camera','cfg-preview':'preview_hz','cfg-leader':'leader_usb_serial','cfg-follower':'follower_usb_serial','cfg-datasets':'dataset_home','cfg-checkpoint':'checkpoint','cfg-calibration':'calibration','record-task':'task','record-count':'episodes','record-duration':'record_seconds','reset-duration':'reset_seconds','act-duration':'act_seconds','act-checkpoint':'checkpoint','act-reference':'reference_start_pose'};
   Object.entries(map).forEach(([id,key])=>{$(id).value=cfg[key];});
   $('cfg-rerun').checked=cfg.rerun;
+  populatePortableConfig(cfg);
   $('act-task').value=cfg.task;
   populateResetSettings(cfg);
   handle(ensureDatasetNaming());
@@ -97,7 +98,7 @@ function updateTelemetry(t, active) {
 }
 function updateControls() {
   if(!state)return;
-  const active=state.active, job=state.job, phase=job?.phase||'', offline=state.offline||runtimeMismatch||state.identity?.source_changed;
+  const active=state.active, job=state.job, phase=job?.phase||'', offline=state.offline||runtimeMismatch||state.identity?.source_changed||state.restart_required;
   const preview=!!state.preview_active, resources=!!(state.resources_active||active||preview);
   const prepare=['prepare-record','prepare-teleop','prepare-act','scan-cameras','monitor-device','connect-control','prepare-replay','act-reset-only'];
   document.querySelectorAll('.hardware').forEach(el=>{el.disabled=!!offline; el.title=offline?'本次离线验收已锁定硬件入口':'';});
@@ -126,7 +127,7 @@ function updateControls() {
   $('hardware-mode').disabled=resources||runtimeMismatch||state.identity?.source_changed;
   const dataset=datasetItems.find(d=>d.root===$('dataset-select').value);
   $('archive-dataset').disabled=resources||!dataset||!!dataset.protected;
-  $('archive-dataset').title=dataset?.protected||'整份文件夹移入 E 盘可恢复归档，不永久删除';
+  $('archive-dataset').title=dataset?.protected||'整份文件夹移入工作区可恢复归档，不永久删除';
   $('create-dataset').disabled=resources;
   $('restore-dataset').disabled=resources||!lastArchive;
   $('restore-selected').disabled=resources||!$('archive-select').value;
@@ -144,6 +145,7 @@ function updateControls() {
   document.querySelectorAll('[data-result],#save-note').forEach(button=>button.disabled=active&&state.job?.kind==='crop');
   $('shortcut-hint').textContent=phase==='RECORDING'?'Space：结束本条并保存。Esc：停止本批。':phase==='RESET'?'Space：结束复位，进入下一条。Esc：停止本批。':'Space 仅在录制 / 复位阶段提前结束。Esc：停止当前任务。';
   updateJointControls();
+  applyPortableState();
 }
 function updatePhase() {
   if(!state)return;
@@ -178,7 +180,7 @@ async function poll() {
     $('hardware-badge').textContent=next.offline?'离线 · 硬件锁定':next.active&&next.job.kind!=='crop'?'设备会话运行中':next.preview_active?'仅相机预览':'设备未连接';
     $('connection-state').textContent='● 本地服务正常 · 系统 WebView2';
     const memory=next.memory?` · 后台 ${next.memory.host_mb} MB${next.memory.worker_mb?' / 任务 '+next.memory.worker_mb+' MB':''}${next.memory.preview_mb?' / 相机 '+next.memory.preview_mb+' MB':''}`:'';
-    $('resource-state').textContent=`E 盘可用 ${next.disk_free_gb} GB${memory}`;
+    $('resource-state').textContent=`工作区可用 ${next.disk_free_gb} GB${memory}`;
     $('task-state').textContent=next.active?(next.job.kind==='crop'&&next.telemetry.crop_total?`裁剪 ${next.telemetry.crop_done} / ${next.telemetry.crop_total} 帧`:(phaseNames[next.job.phase]||next.job.phase)+(next.preview_active?' · 相机预览':'')):next.preview_active?'独立相机预览':'没有后台任务';
     updateTelemetry(next.telemetry||{},next.active);updateControls();updatePhase();
     const details=document.querySelector('.log-panel');
@@ -309,7 +311,7 @@ $('create-dataset').addEventListener('click',()=>handle((async()=>{
 })()));
 $('archive-dataset').addEventListener('click',()=>handle((async()=>{
   const item=datasetItems.find(d=>d.root===$('dataset-select').value);if(!item||item.protected)return;
-  if(!await confirmOperation('删除整份采集文件夹',`将 ${item.name}（${item.episodes} 条）移出数据集库，归档到 E:\\robot\\dataset_archive。\n可恢复，不永久删除，也不会释放 E 盘空间。训练权重、其他数据集不变。`))return;
+  if(!await confirmOperation('删除整份采集文件夹',`将 ${item.name}（${item.episodes} 条）移出数据集库，归档到当前工作区的 dataset_archive。\n可恢复，不永久删除，也不会释放磁盘空间。训练权重、其他数据集不变。`))return;
   pausePlayback();lastArchive=await api('/api/dataset-management',{action:'archive',root:item.root,confirmed_name:item.name});
   await openDataset('');await refreshDatasets();$('dataset-select').value='';toast('整份数据集已移入可恢复归档。');
 })()));
@@ -482,10 +484,11 @@ for(const name of ['pointerup','pointercancel'])$('trajectory-chart').addEventLi
 
 $('save-settings').addEventListener('click',()=>handle((async()=>{
   requireSavedResetPose();
-  const cfg={...state.config,...resetSettingsValues(),top_camera:Number($('cfg-top').value),wrist_camera:Number($('cfg-wrist').value),preview_hz:Number($('cfg-preview').value),rerun:$('cfg-rerun').checked,dataset_home:$('cfg-datasets').value,checkpoint:$('cfg-checkpoint').value};
-  const saved=await api('/api/config',cfg);populateConfig(saved);toast('配置已保存，未连接设备。');
+  const cfg={...state.config,...resetSettingsValues(),...portableConfigValues(),top_camera:Number($('cfg-top').value),wrist_camera:Number($('cfg-wrist').value),preview_hz:Number($('cfg-preview').value),rerun:$('cfg-rerun').checked,dataset_home:$('cfg-datasets').value,checkpoint:$('cfg-checkpoint').value};
+  if(!await confirmBindingChanges(cfg))return;
+  acceptPortableConfig(await api('/api/config',{...cfg,_binding_confirmed:true}));
 })()));
-$('refresh-ports').addEventListener('click',()=>handle(api('/api/ports').then(ports=>{$('ports-list').replaceChildren();if(state.offline){$('ports-list').textContent='离线验收不枚举设备。';return;}ports.forEach(p=>{const item=document.createElement('div');item.textContent=`${p.role} · ${p.port} · ${p.serial||p.name}`;$('ports-list').append(item);});})));
+$('refresh-ports').addEventListener('click',()=>handle(showPortablePorts()));
 document.querySelectorAll('[data-folder]').forEach(b=>b.addEventListener('click',()=>handle(api('/api/open-folder',{target:b.dataset.folder}))));
 async function chooseFolder(inputId, purpose){
   if(!window.pywebview?.api){toast('原生目录选择器仅在独立桌面窗口中可用。');return;}
@@ -555,12 +558,11 @@ function installResetSettings(){
   })()));
   $('save-reset-settings').addEventListener('click',()=>handle((async()=>{
     requireSavedResetPose();
-    const saved=await api('/api/config',{...state.config,...resetSettingsValues()});state.config=saved;
-    $('act-reference').value=saved.reference_start_pose;populateResetSettings(saved);toast('复位设置已保存，只影响新会话；未连接或移动机械臂。');
+    acceptPortableConfig(await api('/api/config',{...state.config,...resetSettingsValues()}));
   })()));
   $('copy-start-pose').addEventListener('click',()=>handle((async()=>{
     const positions=resetPosePositions();
-    if(!await confirmOperation('另存应用层任务起点','将六个目标位置保存为新的 E 盘 JSON，保留原起点和舵机标定不变。这里只保存，不执行动作；新目标及其复位路径仍需实际核对。'))return;
+    if(!await confirmOperation('另存应用层任务起点','将六个目标位置保存为工作区内的新 JSON，保留原起点和舵机标定不变。这里只保存，不执行动作；新目标及其复位路径仍需实际核对。'))return;
     const pose=await api('/api/reset-profile',{positions,source_path:loadedStartPosePath,confirmed:true});
     await loadStartPose(pose.path);toast('已另存新起点；点击“保存复位设置”后用于下一会话。');
   })()));
@@ -575,15 +577,17 @@ function showResetRates(){
 function populateResetSettings(cfg){
   $('cfg-reference').value=cfg.reference_start_pose;$('cfg-reset-speed').value=cfg.reset_arm_speed_deg_s;$('cfg-reset-gripper-speed').value=cfg.reset_gripper_speed_percent_s;
   jointKeys.slice(0,5).forEach((name,index)=>{$('reset-weight-'+index).value=cfg.reset_joint_weights[name];});
-  showResetRates();handle(loadStartPose(cfg.reference_start_pose));
+  showResetRates();
+  if(cfg.reference_start_pose){handle(loadStartPose(cfg.reference_start_pose));}
+  else{loadedStartPosePath='';resetPoseDraft={};jointKeys.forEach((n,i)=>{resetPoseDraft[n]={original:null,edited:false};$('reset-pose-'+i).value='';});$('reset-source').textContent='尚未配置任务起点。遥操/采集不要求固定起点；ACT 或复位前需按自己的标定填写六个目标并另存。';}
 }
 let resetPoseLoad=0,resetPoseDraft={},loadedStartPosePath='';
 function resetPosePositions(){
-  if(!loadedStartPosePath||jointKeys.some(name=>!resetPoseDraft[name]))throw new Error('请先读取有效的任务起点。');
+  if(jointKeys.some(name=>!resetPoseDraft[name]))throw new Error('请先配置自己的从臂标定，并填写完整六关节起点。');
   return Object.fromEntries(jointKeys.map((name,index)=>{
     const draft=resetPoseDraft[name],input=$('reset-pose-'+index),text=input.value.trim();
     if(!text||!Number.isFinite(Number(text)))throw new Error(jointNames[index]+' 起点必须为有效数字，不能留空。');
-    return [name,draft.edited?Number(text):draft.original];
+    return [name,draft.edited||draft.original===null?Number(text):draft.original];
   }));
 }
 function requireSavedResetPose(){
@@ -604,6 +608,7 @@ async function loadStartPose(path){
 installResetSettings();
 installFeedbackHistory();
 installJointControls();
+initPortableSettings();
 window.platformRequestClose=()=>handle((async()=>{
   if(!state?.resources_active){if(window.pywebview?.api)await window.pywebview.api.close_window();return;}
   if(await confirmOperation('停止后关闭','当前任务仍在运行。将先请求正常停止并保存，待后台确认退出后再关闭窗口。不会强杀进程，也不会自动释放从臂力矩。')){

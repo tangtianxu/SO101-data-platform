@@ -15,10 +15,8 @@ import os
 import time
 from pathlib import Path
 
-os.environ.setdefault("HF_HOME", r"E:\robot\hf-cache")
-os.environ.setdefault("TORCH_HOME", r"E:\robot\torch-cache")
-os.environ.setdefault("TEMP", r"E:\robot\temp")
-os.environ.setdefault("TMP", r"E:\robot\temp")
+import so101_profile as profile
+profile.initialize_environment()
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -27,10 +25,10 @@ from lerobot.motors.feetech import FeetechMotorsBus
 from serial.tools import list_ports
 
 
-ROOT = Path(r"E:\robot\datasets\so101_pick_place_clean_no_hand_20260925")
-CALIBRATION = Path(r"E:\robot\hf-cache\lerobot\calibration\robots\so_follower\so101_follower.json")
+ROOT = profile.resource("replay_dataset", "datasets/select_a_dataset")
+CALIBRATION = profile.resource("calibration", "config/follower.json")
 NAMES = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
-EXPECTED_FOLLOWER_SERIAL = "SET_FOLLOWER_USB_SERIAL"
+EXPECTED_FOLLOWER_SERIAL = profile.serial("follower")
 ALIGN_BODY_SPEED_DEG_S = 2.0
 ALIGN_GRIPPER_SPEED_PERCENT_S = 5.0
 ALIGN_TOLERANCE = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 3.0])
@@ -77,7 +75,7 @@ def prepare(episode: int):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--episode", type=int, default=3)
-    parser.add_argument("--port", default="COM10")
+    parser.add_argument("--port", default="auto")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--align-only", action="store_true", help="Only align to this demonstration's start; never play any demonstration frame")
     parser.add_argument("--log", type=Path)
@@ -88,18 +86,14 @@ def main():
     if not args.execute:
         return
     if args.log is None:
-        parser.error("Execution requires an explicit E-drive log path")
+        parser.error("Execution requires an explicit workspace log path")
     if args.log.exists():
         raise FileExistsError("Refusing to overwrite a previous replay log")
-    if args.log.resolve().drive.upper() != "E:":
-        raise ValueError("Replay outputs must stay on E drive")
+    profile.output_path(args.log)
     summary_path = args.log.with_suffix(".json")
     if summary_path.exists():
         raise FileExistsError(summary_path)
-    identity = [p for p in list_ports.comports()
-                if p.device == args.port and p.serial_number == EXPECTED_FOLLOWER_SERIAL]
-    if len(identity) != 1:
-        raise RuntimeError("Follower USB identity mismatch; no motion sent")
+    args.port = profile.resolve_port("follower", list_ports.comports(), args.port)
 
     bus = FeetechMotorsBus(args.port, {
         n: Motor(calibration[n]["id"], "sts3215",

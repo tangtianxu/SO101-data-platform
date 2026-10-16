@@ -4,9 +4,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from common import HERE, atomic_json, robot_path
+from common import HERE, ROBOT_HOME, atomic_json, robot_path
 
-ANNOTATIONS = HERE / 'state/annotations'
+ANNOTATIONS = ROBOT_HOME / 'platform_state/annotations'
 COLLECTION_FILE = 'crop_collection.json'
 
 

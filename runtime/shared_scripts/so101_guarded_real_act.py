@@ -16,11 +16,8 @@ import threading
 import time
 from pathlib import Path
 
-os.environ.setdefault("HF_HOME", "E:/robot/hf-cache")
-os.environ.setdefault("TORCH_HOME", "E:/robot/torch-cache")
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TEMP", "E:/robot/temp")
-os.environ.setdefault("TMP", "E:/robot/temp")
+import so101_profile as profile
+profile.initialize_environment()
 
 import cv2
 import numpy as np
@@ -39,7 +36,7 @@ MAX_COMMAND_JUMP = np.array([5.0] * 5 + [20.0])
 # short stable interval, not an exact annotated success instant or human reset.
 MAX_TRIAL_DURATION = 17.5
 TRIAL_DURATION_BASIS = {
-    "dataset": "E:/robot/datasets/so101_pick_place_clean_no_hand_20260925",
+    "dataset": "historical_task_profile_not_a_universal_dataset",
     "definition": "maximum_retained_successful_demonstration_duration",
     "episode_scope": "all_10_clean_demonstrations_including_held_out_episodes",
     "fps": 30, "maximum_frames": 525, "longest_episode_indices": [2, 3],
@@ -47,7 +44,7 @@ TRIAL_DURATION_BASIS = {
     "exact_success_instant_annotated": False,
     "cleaning_manifest_sha256": "8427DD8E64004AB1A547A80B9A413E6CAF6BA60F09ADAAEC9BA1B0FECAF8A91F",
 }
-REFERENCE_START = Path("E:/robot/config/reference_start_pose.json")
+REFERENCE_START = profile.resource("reference_start_pose", "config/reference_start_pose.json")
 TEMPERATURE_LIMIT_C = 60
 TEMPERATURE_CONFIRMATION_S = 1.0
 
@@ -467,12 +464,7 @@ def reset_to_reference(motion, target, output, record, observe=None, emit=None, 
 
 def resolve_follower_port(requested, ports):
     """USB identity, not the last COM number, determines the physical follower."""
-    matches = [p.device for p in ports if p.serial_number == EXPECTED_FOLLOWER_SERIAL]
-    if len(matches) != 1:
-        raise RuntimeError(f"Expected exactly one follower USB {EXPECTED_FOLLOWER_SERIAL}; found {matches}")
-    if requested != "auto" and requested.upper() != matches[0].upper():
-        raise RuntimeError("Requested COM port is not the verified follower; no hardware writes")
-    return matches[0]
+    return profile.resolve_port("follower", ports, requested)
 
 
 def wait_for_operator(controller, motion, observe, calibration, emit):
@@ -598,8 +590,9 @@ def main(argv=None, controller=None, resources=None):
     print("REAL_ACT_PLAN " + json.dumps(plan, ensure_ascii=False), flush=True)
     if not args.execute and not args.inspect_live:
         return
-    if args.output is None or args.output.resolve().drive.upper() != "E:" or args.output.exists():
-        raise ValueError("Execution requires a new output directory on E drive")
+    if args.output is None or args.output.exists():
+        raise ValueError("Execution requires a new workspace output directory")
+    profile.output_path(args.output)
     port = resolve_follower_port(args.port, shadow.list_ports.comports())
     plan["follower_port"] = port
     args.output.mkdir(parents=True)
@@ -652,7 +645,7 @@ def main(argv=None, controller=None, resources=None):
             report["outcome"] = "completed_reference_reset_only"
             return report
         torch.set_num_threads(1)
-        emit("stage", stage="model_loading", message="复用已加载的 ACT 和处理器；不重新下载或加载。" if resources is not None and resources.model is not None else "从 E 盘加载本地 ACT 权重和原始预处理器。")
+        emit("stage", stage="model_loading", message="复用已加载的 ACT 和处理器；不重新下载或加载。" if resources is not None and resources.model is not None else "加载已配置的本地 ACT 权重和原始预处理器。")
         def load_model():
             cfg = shadow.ACTConfig.from_pretrained(str(args.checkpoint), local_files_only=True)
             if cfg.chunk_size != 100 or not torch.cuda.is_available():

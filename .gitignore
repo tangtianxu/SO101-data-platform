@@ -9,6 +9,13 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-ui/
+workspace/
+**/platform_state/
+**/start_poses/
+**/temp/
+**/hf-cache/
+**/torch-cache/
 envs/
 cache/
 logs/

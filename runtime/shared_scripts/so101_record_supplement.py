@@ -1,7 +1,7 @@
 """Official LeRobot recording with preserved servo settings and slow initial catch-up.
 
 Default is a dry plan. --execute is required for any hardware access.
-Data, diagnostic sidecars, caches and temporary files stay on E:.
+Data, diagnostic sidecars, caches and temporary files stay in the configured workspace.
 """
 from __future__ import annotations
 
@@ -16,18 +16,11 @@ import threading
 import time
 import traceback
 from pathlib import Path
-
-for key, value in {
-    "HF_HOME": "E:/robot/hf-cache", "TORCH_HOME": "E:/robot/torch-cache",
-    "HF_HUB_OFFLINE": "1", "TEMP": "E:/robot/temp", "TMP": "E:/robot/temp",
-    "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
-}.items():
-    os.environ[key] = value
-os.environ["PATH"] = (
-    "E:/robot/envs/lerobot/Lib/site-packages/rerun_sdk/rerun_cli;"
-    "E:/robot/envs/lerobot/Scripts;E:/robot/envs/lerobot/Library/bin;"
-    + os.environ.get("PATH", "")
-)
+import sys
+import so101_profile as profile
+profile.initialize_environment()
+os.environ["PATH"] = os.pathsep.join(str(p) for p in (
+    Path(sys.executable).parent / "Scripts", Path(sys.executable).parent / "Library/bin")) + os.pathsep + os.environ.get("PATH", "")
 
 import numpy as np
 from serial.tools.list_ports import comports
@@ -40,8 +33,9 @@ from lerobot.scripts import lerobot_record as official
 import so101_guarded_real_act as safety
 
 NAMES = safety.NAMES
-CAL = Path("E:/robot/hf-cache/lerobot/calibration")
-SERIALS = {"leader": "SET_LEADER_USB_SERIAL", "follower": "SET_FOLLOWER_USB_SERIAL"}
+import so101_profile as profile
+CAL = profile.workspace() / "hf-cache/lerobot/calibration"
+SERIALS = {role: profile.serial(role) for role in ("leader", "follower")}
 
 
 class RecorderInstanceLock:
@@ -77,13 +71,7 @@ class RecorderInstanceLock:
 
 def resolve_ports():
     ports = list(comports())
-    result = {}
-    for role, serial in SERIALS.items():
-        matches = [p.device for p in ports if p.serial_number == serial]
-        if len(matches) != 1:
-            raise RuntimeError(f"Expected exactly one {role} USB serial {serial}: {matches}")
-        result[role] = matches[0]
-    return result
+    return {role: profile.resolve_port(role, ports) for role in ("leader", "follower")}
 
 
 def clip_target(action, limits):
@@ -202,7 +190,7 @@ class Session:
         self.last_obs = None
         self.last_obs_time = None
         self.last_camera_times = None
-        self.out = Path("E:/robot/logs/supplement_20261015") / f"{args.group}_{time.strftime('%Y%m%d_%H%M%S')}"
+        self.out = profile.resource("log_home", "logs/recording") / f"{args.group}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     def state(self, phase, duration=None, **extra):
         with self.control_lock:
@@ -314,7 +302,7 @@ class PreservedFollower(SO101Follower):
         safety.guard_bus_writes(self.bus)
         self.bus.connect(handshake=False)
         s = self.session
-        safety.preflight(self.bus, self.cal_dict, 1., s.stop, allow_gripper_overload=True)
+        safety.preflight(self.bus, self.cal_dict, 1., s.stop, allow_gripper_overload=profile.allow_gripper_overload())
         for camera in self.cameras.values():
             connect_camera_at_start(camera)
         # Fresh live previews must be reviewed before the first motion write.
@@ -327,7 +315,7 @@ class PreservedFollower(SO101Follower):
             raise KeyboardInterrupt
         s.motion = safety.Motion(self.bus, self.cal_dict, s.stop,
                                  soft_interlocks=False, temperature_confirmation_s=1.,
-                                 allow_gripper_overload=True)
+                                 allow_gripper_overload=profile.allow_gripper_overload())
         s.motion.start_hold()
         s.state("SYNCING")
         last = time.perf_counter()
@@ -413,11 +401,13 @@ def run_session(s):
         cams = {n: OpenCVCameraConfig(index_or_path=i, fps=30, width=640, height=480,
                                       backend=700, fourcc="MJPG", color_mode="rgb")
                 for n, i in (("top", 0), ("wrist", 1))}
-        rcfg = SO101FollowerConfig(port=ports["follower"], id="so101_follower",
-                                  calibration_dir=CAL/"robots/so_follower", cameras=cams,
+        follower_cal = profile.resource("calibration", "config/follower.json")
+        leader_cal = profile.resource("leader_calibration", "config/leader.json")
+        rcfg = SO101FollowerConfig(port=ports["follower"], id=follower_cal.stem,
+                                  calibration_dir=follower_cal.parent, cameras=cams,
                                   use_degrees=True, disable_torque_on_disconnect=False)
-        tcfg = SO101LeaderConfig(port=ports["leader"], id="so101_leader",
-                                calibration_dir=CAL/"teleoperators/so_leader", use_degrees=True)
+        tcfg = SO101LeaderConfig(port=ports["leader"], id=leader_cal.stem,
+                                calibration_dir=leader_cal.parent, use_degrees=True)
         s.robot, s.leader = PreservedFollower(rcfg, s), PreservedLeader(tcfg)
         official.make_robot_from_config = lambda cfg: s.robot
         official.make_teleoperator_from_config = lambda cfg: s.leader
@@ -507,13 +497,13 @@ def run_session(s):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--dataset-root", type=Path, default=Path("E:/robot/datasets/so101_supplement_20261015"))
+    p.add_argument("--dataset-root", type=Path, default=profile.workspace()/"datasets/new_recording")
     p.add_argument("--group", choices=[f"G{i}" for i in range(1, 7)], default="G1")
     p.add_argument("--episodes", type=int, default=5)
     p.add_argument("--execute", action="store_true")
     args = p.parse_args()
-    if args.dataset_root.resolve().drive.upper() != "E:" or args.dataset_root.resolve() == Path("E:/"):
-        p.error("A specific E-drive dataset directory is required")
+    if not args.dataset_root.resolve().is_relative_to(profile.workspace()) or args.dataset_root.resolve() == profile.workspace():
+        p.error("A specific dataset directory inside the configured workspace is required")
     if not 1 <= args.episodes <= 5:
         p.error("Record 1..5 episodes per position group")
     if not args.execute:

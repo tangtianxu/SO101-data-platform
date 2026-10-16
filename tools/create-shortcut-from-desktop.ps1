@@ -1,5 +1,5 @@
 $ErrorActionPreference='Stop'
-$platformRoot='E:\robot\projects\so101_data_platform'
+$platformRoot=Split-Path -Parent $PSScriptRoot
 $nonce=[Guid]::NewGuid().ToString('N')
 $task=Join-Path $platformRoot 'tools\install-desktop-shortcut.ps1'
 $result=Join-Path $platformRoot ('state\shortcut_receipts\'+$nonce+'.json')

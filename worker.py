@@ -18,7 +18,7 @@ import time
 import traceback
 from types import SimpleNamespace
 
-from common import NAMES, atomic_json, environment, number, robot_path
+from common import NAMES, atomic_json, environment, number, robot_path, require_capability, read_calibration
 from reset_profile import effective_speeds
 
 environment()
@@ -164,10 +164,15 @@ def ports_for(cfg, roles=("follower",)):
     ports = list(comports())
     result = {}
     for role in roles:
-        matches = [p.device for p in ports if p.serial_number == cfg[role + "_usb_serial"]]
+        expected = cfg[role + "_usb_serial"]
+        if not expected or expected.startswith('SET_'):
+            raise ValueError(role + ' USB 身份尚未配置，不猜测串口')
+        matches = [p.device for p in ports if p.serial_number == expected]
         if len(matches) != 1:
             raise RuntimeError(f"{role} USB 身份不唯一或未连接：{matches}，未发送动作")
         result[role] = matches[0]
+        if cfg.get(role+'_port','auto') not in ('auto',matches[0]):
+            raise RuntimeError(role+' 显式串口与 USB 身份不一致，未连接设备')
     return result
 
 
@@ -187,9 +192,9 @@ def install_escape(bridge):
 def preview_only(cfg, bridge, scan=False):
     import cv2
     if scan:
-        bridge.state("SCANNING", "正在检查相机索引 0–5；仅打开视频，不访问舵机")
+        bridge.state("SCANNING", "正在检查常用及已配置相机索引；仅打开视频，不访问舵机")
         found = []
-        for index in range(6):
+        for index in sorted(set(range(6)) | {cfg['top_camera'],cfg['wrist_camera']}):
             if bridge.stop.is_set():
                 break
             cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
@@ -232,8 +237,8 @@ def bus_from_config(cfg, role="follower"):
     from lerobot.motors import Motor, MotorCalibration, MotorNormMode
     from lerobot.motors.feetech import FeetechMotorsBus
     port = ports_for(cfg, (role,))[role]
-    cal_path = Path(cfg["calibration"]) if role == "follower" else Path("E:/robot/hf-cache/lerobot/calibration/teleoperators/so_leader/so101_leader.json")
-    cal = json.loads(cal_path.read_text(encoding="utf-8"))
+    cal_path = cfg['calibration' if role == 'follower' else 'leader_calibration']
+    cal = read_calibration(cal_path)
     bus = FeetechMotorsBus(port, {n: Motor(cal[n]["id"], "sts3215",
         MotorNormMode.RANGE_0_100 if n == "gripper" else MotorNormMode.DEGREES) for n in NAMES},
         calibration={n: MotorCalibration(**cal[n]) for n in NAMES})
@@ -252,6 +257,7 @@ def read_health(bus):
 def monitor_or_control(cfg, options, bridge, out, kind):
     import numpy as np
     safety = __import__("so101_guarded_real_act") if kind != "monitor" else None
+    overload = cfg.get('gripper_overload_policy','stop') == 'log_gripper_only'
     bus, cal, port = bus_from_config(cfg)
     if safety:
         safety.guard_bus_writes(bus)
@@ -268,9 +274,9 @@ def monitor_or_control(cfg, options, bridge, out, kind):
             if any(actual[n] != cal[n][field] for n in NAMES):
                 raise RuntimeError("标定不一致，未写入任何参数")
         if safety:
-            safety.preflight(bus, cal, 1., bridge.stop, allow_gripper_overload=True)
+            safety.preflight(bus, cal, 1., bridge.stop, allow_gripper_overload=overload)
             motion = safety.Motion(bus, cal, bridge.stop, soft_interlocks=False,
-                                   temperature_confirmation_s=1., allow_gripper_overload=True)
+                                   temperature_confirmation_s=1., allow_gripper_overload=overload)
             import software_limits
             manual_bounds=software_limits.effective(cfg,cal)
             software_limits.guard_motion(motion,manual_bounds)
@@ -296,7 +302,7 @@ def monitor_or_control(cfg, options, bridge, out, kind):
             if cmd.get("confirmed") is not True:
                 raise ValueError("操作未确认")
             if name == "hold":
-                safety.preflight(bus, cal, 1., bridge.stop, allow_gripper_overload=True)
+                safety.preflight(bus, cal, 1., bridge.stop, allow_gripper_overload=overload)
                 motion.start_hold()
                 bridge.state("CONTROL", "当前位置保持已确认；可以移开支撑")
             elif name == "release":
@@ -426,10 +432,11 @@ def record_or_teleop(cfg, options, bridge, out, kind):
         threading.Thread(target=relay, daemon=True).start()
         cameras = {n: rec.OpenCVCameraConfig(index_or_path=cfg[n+"_camera"], fps=30, width=640,
             height=480, backend=700, fourcc="MJPG", color_mode="rgb") for n in ("top", "wrist")}
-        rcfg = rec.SO101FollowerConfig(port=ports["follower"], id="so101_follower",
-            calibration_dir=rec.CAL/"robots/so_follower", cameras=cameras, use_degrees=True, disable_torque_on_disconnect=False)
-        tcfg = rec.SO101LeaderConfig(port=ports["leader"], id="so101_leader",
-            calibration_dir=rec.CAL/"teleoperators/so_leader", use_degrees=True)
+        follower_cal, leader_cal = Path(cfg['calibration']), Path(cfg['leader_calibration'])
+        rcfg = rec.SO101FollowerConfig(port=ports["follower"], id=follower_cal.stem,
+            calibration_dir=follower_cal.parent, cameras=cameras, use_degrees=True, disable_torque_on_disconnect=False)
+        tcfg = rec.SO101LeaderConfig(port=ports["leader"], id=leader_cal.stem,
+            calibration_dir=leader_cal.parent, use_degrees=True)
         class SensorFollower(rec.PreservedFollower):
             feedback = None
             sensor_frame = None
@@ -579,7 +586,7 @@ def run_act(cfg, options, bridge, out):
             "--duration", str(cfg["act_seconds"]), "--port", "auto", "--top-camera", str(cfg["top_camera"]),
             "--wrist-camera", str(cfg["wrist_camera"]), "--checkpoint", cfg["checkpoint"],
             "--calibration", cfg["calibration"], "--control-mode", "standard",
-            "--gripper-overload-policy", "log_gripper_only", "--reset-before-act",
+            "--gripper-overload-policy", cfg.get('gripper_overload_policy','stop'), "--reset-before-act",
             "--reference-start-pose", cfg["reference_start_pose"], "--clear-reset-route-confirmed", "--empty-gripper-confirmed"]
     args += ["--reset-speeds", *map(str, effective_speeds(cfg))]
     # The verified runner waits at READY before any hold/reset/model action.
@@ -608,11 +615,11 @@ def replay(cfg, options, bridge, out):
         raise ValueError("回放标定不一致")
     safety.guard_bus_writes(bus)
     motion = safety.Motion(bus, cal, bridge.stop, soft_interlocks=False,
-                           temperature_confirmation_s=1., allow_gripper_overload=True)
+                           temperature_confirmation_s=1., allow_gripper_overload=cfg.get('gripper_overload_policy','stop')=='log_gripper_only')
     listener = install_escape(bridge)
     try:
         bus.connect(handshake=False)
-        safety.preflight(bus, cal, 1., bridge.stop, allow_gripper_overload=True)
+        safety.preflight(bus, cal, 1., bridge.stop, allow_gripper_overload=cfg.get('gripper_overload_policy','stop')=='log_gripper_only')
         bridge.state("REPLAY_READY", "轨迹已检查；源为 observation.state。确认完整路线后开始低速对齐", summary=summary)
         while not bridge.stop.is_set():
             try:
@@ -683,6 +690,8 @@ def main():
         initial.extend(chunk)
     first = json.loads(initial)
     cfg, options = first["config"], first["options"]
+    environment(cfg)
+    require_capability(cfg, 'preview' if first['kind']=='camera_scan' else first['kind'])
     out = robot_path(first["output"], existing=True)
     import faulthandler
     trace = None
@@ -690,6 +699,8 @@ def main():
         trace = (out / "worker_trace.log").open("w", encoding="utf-8")
         faulthandler.dump_traceback_later(15, file=trace)
     sys.path.insert(0, cfg["shared_scripts"])
+    from so101_profile import configure
+    configure(cfg)
     bridge = Bridge(cfg)
     threading.Thread(target=bridge.read_commands, daemon=True).start()
     report = {"outcome": "not_started"}

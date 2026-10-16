@@ -1,5 +1,6 @@
 """Build the Windows shortcut icon on E: using the existing Pillow install."""
 from pathlib import Path
+import os
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -16,7 +17,8 @@ def main():
         radius=52 * scale,
         fill="#1c2b3d",
     )
-    font = ImageFont.truetype("C:/Windows/Fonts/segoeuib.ttf", 172 * scale)
+    font_path=Path(os.environ.get('WINDIR',''))/'Fonts/segoeuib.ttf'
+    font = ImageFont.truetype(str(font_path), 172 * scale) if font_path.is_file() else ImageFont.load_default(size=172*scale)
     draw.text((128 * scale, 183 * scale), "S", font=font, anchor="ms", fill="white")
     draw.rounded_rectangle(
         (178 * scale, 194 * scale, 216 * scale, 208 * scale),

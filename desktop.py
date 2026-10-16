@@ -13,24 +13,25 @@ import time
 import traceback
 from urllib.request import ProxyHandler, Request, build_opener
 
-from common import HERE, atomic_json, environment, load_config, robot_path
+from common import HERE, ROBOT_HOME, atomic_json, environment, load_config, robot_path, input_path, ensure_workspace
 from app_identity import Deployment,VERSION
 
 
 def choose_start_pose_file(window, open_dialog, current_path, fallback_path):
     """Native file picker only; reading/coordinate validation stays in the backend."""
     try:
-        initial = robot_path(current_path, existing=True)
+        initial = input_path(current_path)
     except (ValueError, OSError):
-        initial = robot_path(fallback_path, existing=True)
+        try:initial = input_path(fallback_path)
+        except (ValueError,OSError):initial = ROBOT_HOME
     directory = initial if initial.is_dir() else initial.parent
     result = window.create_file_dialog(open_dialog, directory=str(directory),
         allow_multiple=False, file_types=("任务起点 JSON (*.json)",))
     if not result:
         return None
-    selected = robot_path(result[0], existing=True)
+    selected = input_path(result[0])
     if not selected.is_file() or selected.suffix.lower() != ".json":
-        raise ValueError("请选择 E:\\robot 内的任务起点 JSON 文件，不是文件夹或标定文件")
+        raise ValueError("请选择任务起点 JSON 文件，不是文件夹或标定文件")
     return str(selected)
 
 
@@ -46,8 +47,7 @@ def main():
     if not sys.flags.no_user_site:
         raise RuntimeError("请使用 launch.cmd 启动隔离环境")
     cfg = load_config()
-    if HERE.resolve()!=Path('E:/robot/projects/so101_data_platform').resolve():
-        raise RuntimeError('此目录不是正式项目。请使用 E:\\robot\\SO101数采平台.cmd，不启动源码副本')
+    ensure_workspace(cfg)
     if args.launch_nonce and not re.fullmatch(r'[a-f0-9]{32}',args.launch_nonce):raise ValueError('启动标识无效')
     deployment=Deployment()
     host_identity=deployment.identity()
@@ -58,7 +58,9 @@ def main():
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
     ctypes.set_last_error(0)
-    mutex = kernel.CreateMutexW(None, False, "Local\\SO101_DataPlatformDesktop")
+    import hashlib
+    workspace_id=hashlib.sha256(str(ROBOT_HOME).encode()).hexdigest()[:16]
+    mutex = kernel.CreateMutexW(None, False, "Local\\SO101_DataPlatformDesktop_"+workspace_id)
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == 183:
@@ -67,7 +69,8 @@ def main():
         return
     state_dir = HERE / "state"
     state_dir.mkdir(exist_ok=True)
-    url = "http://127.0.0.1:8791/"
+    port=cfg['server_port']
+    url = f"http://127.0.0.1:{port}/"
     proc = None
     output = (state_dir / "desktop.log").open("a", encoding="utf-8")
     token = None
@@ -87,8 +90,8 @@ def main():
         # No re-use of an unverified existing server at this port.
         import socket
         with socket.socket() as probe:
-            if probe.connect_ex(("127.0.0.1", 8791)) == 0:
-                raise RuntimeError("端口 8791 已占用。请关闭旧平台的后台，或检查 desktop.log；不会连接未知服务。")
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                raise RuntimeError(f"端口 {port} 已占用。请检查同一工作区的旧实例或配置其他端口；不会连接未知服务。")
         proc = subprocess.Popen([cfg["python"], "-s", "-B", "-u", "-X", "utf8", str(HERE / "server.py"),
             "--no-browser"] + (["--offline"] if offline else []), cwd=HERE, env=environment(),
             stdout=output, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW)
@@ -123,11 +126,23 @@ def main():
                     'launch_nonce':args.launch_nonce,'python':sys.executable}
             def choose_folder(self, current_path=""):
                 try:
-                    initial=robot_path(current_path,existing=True)
+                    initial=input_path(current_path)
                     if not initial.is_dir():initial=initial.parent
                 except (ValueError,OSError):
                     initial=Path(cfg['dataset_home'])
                 result = window.create_file_dialog(webview.FileDialog.FOLDER, directory=str(initial))
+                return str(result[0]) if result else None
+
+            def choose_resource(self,kind,current_path=""):
+                try:initial=input_path(current_path)
+                except (ValueError,OSError):initial=ROBOT_HOME
+                directory=initial if initial.is_dir() else initial.parent
+                if kind in ('workspace','model','directory'):
+                    result=window.create_file_dialog(webview.FileDialog.FOLDER,directory=str(directory))
+                elif kind in ('python','calibration','start_pose'):
+                    types=('Python (*.exe)',) if kind=='python' else ('JSON (*.json)',)
+                    result=window.create_file_dialog(webview.FileDialog.OPEN,directory=str(directory),allow_multiple=False,file_types=types)
+                else:raise ValueError('未知资源类型')
                 return str(result[0]) if result else None
 
             def choose_start_pose(self, current_path=""):
@@ -351,7 +366,7 @@ def main():
             if args.smoke_test:smoke()
 
         webview.start(func=ready, gui="edgechromium", debug=False,
-            private_mode=False, storage_path="E:/robot/cache/so101_ui/webview2",
+            private_mode=False, storage_path=str(ROBOT_HOME/'cache/so101_ui/webview2'),
             localization={"global.quitConfirmation": "确认关闭 SO101 数采平台？"})
     finally:
         if proc and proc.poll() is None:

@@ -13,7 +13,7 @@ import uuid
 
 from common import HERE, ROBOT_HOME, atomic_json, number, robot_path
 
-REGISTRY = HERE / "state/dataset_registry.json"
+REGISTRY = ROBOT_HOME / "platform_state/dataset_registry.json"
 DOMAINS = {"real": "实机", "sim": "仿真"}
 TASKS = {"doll_pick_place": "娃娃抓放", "pick_place": "通用抓放", "material_grasp": "材质夹取判别"}
 PURPOSES = {"demo": "正式示范", "smoke": "联调测试", "eval": "评估"}

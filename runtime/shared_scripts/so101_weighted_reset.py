@@ -17,11 +17,12 @@ from pathlib import Path
 
 import numpy as np
 import so101_guarded_real_act as act
+import so101_profile as profile
 
 NAMES = act.NAMES
 SPEEDS = np.array([4.0, 3.2, 2.4, 1.6, 0.8, 10.0])
 WEIGHTS = np.array([1.0, 0.8, 0.6, 0.4, 0.2])
-SOURCE = Path("E:/robot/logs/real_act_trial_20261014-170444")
+SOURCE = profile.resource("reset_source", "logs/select_a_reset_source")
 
 
 def weighted_targets(current, target, speeds=SPEEDS):
@@ -66,12 +67,12 @@ def main():
           "exit_holds_until_operator_confirms_support_for_separate_release": True}), flush=True)
     if not args.execute:
         return
-    if args.output is None or args.output.exists() or args.output.resolve().drive.upper() != "E:":
-        raise ValueError("Use a new E-drive output directory")
-    if not any(p.device == "COM10" and p.serial_number == act.EXPECTED_FOLLOWER_SERIAL for p in act.shadow.list_ports.comports()):
-        raise RuntimeError("Follower USB identity mismatch")
+    if args.output is None or args.output.exists():
+        raise ValueError("Use a new workspace output directory")
+    profile.output_path(args.output)
+    port = profile.resolve_port("follower", act.shadow.list_ports.comports())
     args.output.mkdir(parents=True)
-    bus = act.shadow.FeetechMotorsBus("COM10", {
+    bus = act.shadow.FeetechMotorsBus(port, {
         n: act.shadow.Motor(calibration[n]["id"], "sts3215", act.shadow.MotorNormMode.RANGE_0_100
                            if n == "gripper" else act.shadow.MotorNormMode.DEGREES) for n in NAMES
     }, calibration={n: act.shadow.MotorCalibration(**calibration[n]) for n in NAMES})

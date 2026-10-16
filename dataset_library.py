@@ -1,4 +1,4 @@
-"""Dataset-folder management. Removal is a recoverable E-drive archive, never rmtree."""
+"""Dataset-folder management. Removal is a recoverable workspace archive, never rmtree."""
 from datetime import datetime
 import json
 from pathlib import Path

@@ -2,7 +2,8 @@ param(
  [Parameter(Mandatory=$true)][ValidatePattern('^[a-f0-9]{32}$')][string]$Nonce
 )
 $ErrorActionPreference='Stop'
-$platformRoot='E:\robot\projects\so101_data_platform'
+$platformRoot=Split-Path -Parent $PSScriptRoot
+. (Join-Path $platformRoot 'scripts\ui-environment.ps1')
 $receiptDir=Join-Path $platformRoot 'state\shortcut_receipts'
 $receiptPath=Join-Path $receiptDir ($Nonce+'.json')
 if(Test-Path -LiteralPath $receiptPath){throw 'Receipt exists; use a fresh nonce'}
@@ -11,8 +12,8 @@ try{
  $self=Get-CimInstance Win32_Process -Filter ('ProcessId='+$PID)
  $parent=Get-CimInstance Win32_Process -Filter ('ProcessId='+$self.ParentProcessId)
  if($parent.Name -ne 'explorer.exe'){throw 'Install through the actual Explorer desktop, not an alternate profile'}
- $label='SO101'+[char]0x6570+[char]0x91c7+[char]0x5e73+[char]0x53f0
- $formal=Join-Path 'E:\robot' ($label+'.cmd')
+ $label='SO101 Data Platform (Portable)'
+ $formal=Join-Path $platformRoot 'launch.cmd'
  $launcher=Join-Path $env:WINDIR 'System32\cmd.exe'
  $launcherArguments='/d /c call "'+$formal+'"'
  $icon=Join-Path $platformRoot 'assets\so101.ico'
@@ -34,10 +35,7 @@ try{
   if(Test-Path -LiteralPath $shortcutPath){
    $old=$wsh.CreateShortcut($shortcutPath)
    if(![string]::Equals($old.TargetPath,$launcher,[StringComparison]::OrdinalIgnoreCase) -or $old.Arguments -ne $launcherArguments){
-    $backupDir=Join-Path $platformRoot 'state\shortcut_backups'
-    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-    $backup=Join-Path $backupDir ($Nonce+'-'+$destination.kind+'.lnk')
-    Copy-Item -LiteralPath $shortcutPath -Destination $backup -ErrorAction Stop
+    throw 'A shortcut with this name points elsewhere; refusing to overwrite it'
    }
   }
   $link=$wsh.CreateShortcut($shortcutPath)
@@ -45,7 +43,7 @@ try{
   $link.Arguments=$launcherArguments
   $link.WorkingDirectory=$platformRoot
   $link.IconLocation=$icon+',0'
-  $link.Description='SO101 Data Platform - canonical E: launcher, opens offline'
+  $link.Description='SO101 Data Platform - portable project launcher, opens offline'
   $link.WindowStyle=7
   $link.Save()
   $saved=$wsh.CreateShortcut($shortcutPath)
@@ -56,7 +54,7 @@ try{
    working_directory=$saved.WorkingDirectory;icon=$saved.IconLocation;
    bytes=(Get-Item -LiteralPath $shortcutPath).Length;previous_backup=$backup}
  }
- $identityJson=& 'E:\robot\envs\lerobot\python.exe' -s -B -X utf8 (Join-Path $platformRoot 'app_identity.py')
+ $identityJson=& (Get-So101UiPython $platformRoot) -s -B -X utf8 (Join-Path $platformRoot 'app_identity.py')
  if($LASTEXITCODE -ne 0){throw 'Cannot verify the canonical build'}
  $identity=$identityJson|ConvertFrom-Json
  $record=[ordered]@{

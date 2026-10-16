@@ -8,20 +8,17 @@ import uuid
 
 from common import HERE
 
-VERSION='0.2.3'
-APP_ID='so101.data-platform.local'
-ENTRY=Path('E:/robot/SO101数采平台.cmd')
+VERSION='0.3.0'
+APP_ID='so101.data-platform.portable'
+ENTRY=HERE/'launch.cmd'
 
 
 def source_files(root=HERE):
     root=Path(root)
-    files=list(root.glob('*.py'))+list(root.glob('*.cmd'))+[root/'config.json']
+    files=list(root.glob('*.py'))+list(root.glob('*.cmd'))+[root/'config.json',root/'config.example.json']
     files+=list((root/'dist').glob('*.html'))+list((root/'dist').glob('*.js'))+list((root/'dist').glob('*.css'))
     files+=list((root/'scripts').glob('*.ps1'))
-    if root.resolve()==HERE.resolve():
-        files += [Path('E:/robot/scripts')/name for name in ('so101_guarded_real_act.py','so101_act_shadow.py',
-            'so101_guarded_real_replay.py','so101_weighted_reset.py','so101_record_supplement.py')]
-        if ENTRY.is_file():files.append(ENTRY)
+    files += list((root/'runtime/shared_scripts').glob('*.py'))
     return sorted({p.resolve() for p in files if p.is_file()},key=lambda p:str(p).lower())
 
 
@@ -29,11 +26,11 @@ class Deployment:
     def __init__(self,root=HERE):
         self.root=Path(root).resolve();self.files=source_files(self.root)
         self.signatures={p:(p.stat().st_mtime_ns,p.stat().st_size) for p in self.files}
-        manifest={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in self.files}
+        manifest={str(p.relative_to(self.root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in self.files}
         digest=hashlib.sha256()
         for name,value in manifest.items():digest.update((name+'\0'+value+'\n').encode('utf-8'))
         self.build=digest.hexdigest()[:12];self.instance=uuid.uuid4().hex
-        self.started=datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds')
+        self.started=datetime.now().astimezone().isoformat(timespec='seconds')
         self.assets={p.name:p.read_bytes() for p in (self.root/'dist').iterdir() if p.is_file()} if (self.root/'dist').is_dir() else {}
         self.last_check=0.;self.invalidated=False
 

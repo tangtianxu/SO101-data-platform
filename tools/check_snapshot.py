@@ -6,20 +6,20 @@ import re
 import subprocess
 
 root = Path(__file__).resolve().parents[1]
-python_files = sorted(root.rglob("*.py"))
-json_files = sorted(p for p in root.rglob("*.json") if ".git" not in p.parts)
+try:
+    paths = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        check=True, capture_output=True,
+    ).stdout.decode("utf-8").split("\0")
+    files = sorted({root / name for name in paths if name and (root/name).is_file()})
+except (OSError, subprocess.CalledProcessError):
+    files = [p for p in root.rglob("*") if p.is_file() and not set(p.relative_to(root).parts)&{'.git','.venv-ui','workspace','state','__pycache__'}]
+python_files=[p for p in files if p.suffix=='.py']
+json_files=[p for p in files if p.suffix=='.json']
 for path in python_files:
     ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path.relative_to(root)))
 for path in json_files:
     json.loads(path.read_text(encoding="utf-8-sig"))
-try:
-    paths = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z"],
-        check=True, capture_output=True,
-    ).stdout.decode("utf-8").split("\0")
-    files = [root / name for name in paths if name]
-except (OSError, subprocess.CalledProcessError):
-    files = [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
 for path in files:
     relative = path.relative_to(root)
     assert not any(part in {"state", "datasets", "data_feedback", "calibration", "logs"} for part in relative.parts), relative

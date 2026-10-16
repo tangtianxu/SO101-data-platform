@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 import time
 
-from common import NAMES,atomic_json,number
+from common import NAMES,atomic_json,number,read_calibration
 from reset_profile import effective_speeds
 import software_limits
 
@@ -20,7 +20,7 @@ def limits(calibration):
 
 
 def profile(cfg):
-    calibration=json.loads(Path(cfg['calibration']).read_text(encoding='utf-8'))
+    calibration=read_calibration(cfg['calibration'])
     bounds=software_limits.effective(cfg,calibration);baseline=limits(calibration);rates=effective_speeds(cfg)
     return {'calibration_id':calibration_id(calibration),'calibration_path':cfg['calibration'],
         'limits_id':software_limits.identity(bounds,calibration),'scope':'basic_control_only',

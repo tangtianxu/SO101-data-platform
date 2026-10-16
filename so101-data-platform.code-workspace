@@ -1,7 +1,6 @@
 {
   "folders": [{"path": "."}],
   "settings": {
-    "python.defaultInterpreterPath": "E:/robot/envs/lerobot/python.exe",
     "files.exclude": {"**/__pycache__": true},
     "search.exclude": {"state/**": true}
   }

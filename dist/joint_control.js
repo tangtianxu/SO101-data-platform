@@ -23,11 +23,11 @@ function installJointControls(){
   $('joint-stop').addEventListener('click',()=>handle(command('stop')));
   const version=document.querySelector('.sidebar-bottom .version');version.id='runtime-version';version.title='点击查看版本、实例与正式入口';version.tabIndex=0;
   version.addEventListener('click',()=>{setView('settings');$('runtime-identity-card').scrollIntoView({behavior:'smooth'});});
-  const runtime=document.createElement('section');runtime.id='runtime-identity-card';runtime.className='panel settings-card wide';runtime.innerHTML='<h2>当前版本与正式入口</h2><div id="runtime-details" class="runtime-details">等待后台身份核对</div><p class="field-help">所有入口调用同一 E 盘源码与 state。前端、后台、原生窗口需为同一构建；源文件更新后需先停止并重开，不混用新旧控制代码。</p>';
+  const runtime=document.createElement('section');runtime.id='runtime-identity-card';runtime.className='panel settings-card wide';runtime.innerHTML='<h2>当前版本与正式入口</h2><div id="runtime-details" class="runtime-details">等待后台身份核对</div><p class="field-help">所有入口调用同一 当前工作区配置和同一份源码。前端、后台、原生窗口需为同一构建；源文件更新后需先停止并重开，不混用新旧控制代码。</p>';
   document.querySelector('.settings-grid').append(runtime);
   const notice=document.createElement('section');notice.id='runtime-mismatch';notice.className='notice runtime-warning hidden';notice.textContent='当前窗口与后台版本不一致，已禁止新操作。请正常停止后，从正式入口重新打开。';document.querySelector('main').prepend(notice);
   installSoftwareLimits();
-  handle(api('/api/joint-control-profile').then(applyJointProfile));
+  // Loaded after a follower calibration is explicitly configured, not on first-run boot.
 }
 function applyJointProfile(value){
     jointControlProfile=value;value.joints.forEach((joint,i)=>{

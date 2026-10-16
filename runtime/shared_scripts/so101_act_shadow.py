@@ -10,11 +10,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-os.environ.setdefault("HF_HOME", "E:/robot/hf-cache")
-os.environ.setdefault("TORCH_HOME", "E:/robot/torch-cache")
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TEMP", "E:/robot/temp")
-os.environ.setdefault("TMP", "E:/robot/temp")
+import so101_profile as profile
+profile.initialize_environment()
 
 import cv2
 import numpy as np
@@ -28,8 +25,8 @@ from lerobot.policies.act.modeling_act import ACTPolicy, ACTTemporalEnsembler
 from lerobot.policies.factory import make_pre_post_processors
 
 
-CHECKPOINT = Path("E:/robot/runs/act_no_hand_5000_20260926/checkpoints/005000/pretrained_model")
-CALIBRATION = Path("E:/robot/hf-cache/lerobot/calibration/robots/so_follower/so101_follower.json")
+CHECKPOINT = profile.resource("checkpoint", "models/act/pretrained_model")
+CALIBRATION = profile.resource("calibration", "config/follower.json")
 NAMES = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
 CAMERA_URL = "http://127.0.0.1:8768"
 
@@ -63,22 +60,20 @@ def main():
     parser.add_argument("--frames", default=180, type=int)
     parser.add_argument("--profile", choices=("both", "ensemble", "chunk10"), default="both")
     args = parser.parse_args()
-    if args.output.resolve().drive.upper() != "E:":
-        raise ValueError("All outputs must stay on E drive")
+    profile.output_path(args.output)
     if args.output.exists():
         raise FileExistsError("Refusing to overwrite an earlier shadow audit")
     if args.frames < 30 or args.frames > 600:
         raise ValueError("This bounded shadow test requires 30..600 frames per profile")
     args.output.mkdir(parents=True)
     calibration = json.loads(CALIBRATION.read_text(encoding="utf-8"))
-    if not any(p.device == "COM10" and p.serial_number == "SET_FOLLOWER_USB_SERIAL" for p in list_ports.comports()):
-        raise RuntimeError("Follower USB identity mismatch")
+    port = profile.resolve_port("follower", list_ports.comports())
     limits = np.array([
         [-(calibration[n]["range_max"] - calibration[n]["range_min"]) * 180 / 4095,
          (calibration[n]["range_max"] - calibration[n]["range_min"]) * 180 / 4095]
         if n != "gripper" else [0, 100] for n in NAMES
     ])
-    bus = FeetechMotorsBus("COM10", {
+    bus = FeetechMotorsBus(port, {
         n: Motor(calibration[n]["id"], "sts3215", MotorNormMode.RANGE_0_100 if n == "gripper" else MotorNormMode.DEGREES)
         for n in NAMES
     }, calibration={n: MotorCalibration(**calibration[n]) for n in NAMES})
