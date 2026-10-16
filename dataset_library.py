@@ -33,6 +33,29 @@ def child_folder(cfg, root, existing=True):
     return folder
 
 
+def dataset_time(folder, naming):
+    """Acquisition time, never the mutable registry update/file modification time."""
+    start=(naming.get('simple_spec') or {}).get('started_at')
+    if isinstance(start,str) and start:
+        try:
+            stamp=datetime.fromisoformat(start.replace('Z','+00:00')).timestamp()
+            return {'sort_time':stamp,'time_source':'collection_start','started_at':start}
+        except (ValueError,TypeError,OverflowError,OSError):
+            pass
+    plan=folder/'.platform-plan.json'
+    if plan.is_file():
+        try:
+            created=json.loads(plan.read_text(encoding='utf-8'))['created']
+            if not isinstance(created,str):raise ValueError('invalid plan creation time')
+            stamp=datetime.fromisoformat(created.replace('Z','+00:00')).timestamp()
+            return {'sort_time':stamp,'time_source':'plan_created','started_at':created}
+        except (OSError,ValueError,TypeError,KeyError,OverflowError):
+            pass
+    stat=folder.stat()
+    stamp=getattr(stat,'st_birthtime',stat.st_ctime)
+    return {'sort_time':stamp,'time_source':'filesystem_created','started_at':None}
+
+
 def list_datasets(cfg):
     protected = protected_roots(cfg)
     names = registry()
@@ -48,13 +71,16 @@ def list_datasets(cfg):
             continue
         try:
             meta = json.loads(info.read_text(encoding="utf-8")) if info.is_file() else {}
+            naming=describe(folder,names)
             result.append({"name": folder.name, "root": str(folder), "episodes": meta.get("total_episodes", 0),
                 "frames": meta.get("total_frames", 0), "version": meta.get("codebase_version", "待采集"),
                 "ready": info.is_file(), "protected": protected.get(folder.resolve()),
-                "naming": describe(folder,names)})
+                "naming": naming, **dataset_time(folder,naming)})
         except (OSError, ValueError):
             continue
-    return result[:100]
+    # A label edit must not promote an old dataset, and older datasets must remain discoverable.
+    result.sort(key=lambda item:(item['sort_time'],item['root'].casefold()),reverse=True)
+    return result
 
 
 def create_dataset(cfg, name):

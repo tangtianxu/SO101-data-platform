@@ -42,6 +42,65 @@ function datasetOptionLabel(item){
   const review={pending:'待审',train:'可训练',exclude:'排除'}[s.review],stage=s.stage==='raw'?'原始':'处理后';
   return `[${s.domain==='real'?'实机':'仿真'}·${stage}·${review}] ${s.started_at.slice(5,16).replace('T',' ')} · ${s.instruction.slice(0,20)} · ${s.description.slice(0,20)} · ${item.episodes}条`;
 }
+let datasetCategory='raw';
+const datasetCategories={raw:'原始数据',train:'可训练',other:'处理 / 其他',all:'全部'};
+function datasetCategoryOf(item){
+  const spec=item.naming?.spec||item.naming?.simple_spec;
+  if(item.ready&&spec?.review==='train')return 'train';
+  if(spec?.stage==='raw'&&spec?.review!=='exclude')return 'raw';
+  return 'other';
+}
+function sortDatasetItems(items){
+  return [...items].sort((a,b)=>{
+    const time=d=>Number.isFinite(d.sort_time)?d.sort_time:Date.parse(d.naming?.simple_spec?.started_at||'')||0;
+    return time(b)-time(a)||String(b.root).localeCompare(String(a.root));
+  });
+}
+function datasetMatchesSearch(item){
+  const query=$('dataset-search')?.value.trim().toLocaleLowerCase()||'';
+  const s=item.naming?.simple_spec||{};
+  return !query||[item.name,item.naming?.display_name,s.instruction,s.description,s.note].join(' ').toLocaleLowerCase().includes(query);
+}
+function visibleDatasets(){
+  return sortDatasetItems(datasetItems).filter(item=>(datasetCategory==='all'||datasetCategoryOf(item)===datasetCategory)&&datasetMatchesSearch(item));
+}
+function renderDatasetChoices(preferred=$('dataset-select').value){
+  const select=$('dataset-select'),items=visibleDatasets();
+  select.replaceChildren(new Option(items.length?'请选择数据集':$('dataset-search')?.value.trim()?'没有匹配的数据集':'此分类暂无数据集',''));
+  for(const item of items){
+    const option=new Option(datasetOptionLabel(item)+(item.protected?' · 保留':''),item.root);
+    option.title=(item.naming?.display_name||item.name)+'\n'+(item.started_at||'未记录采集时间，按目录创建时间排序')+'\n'+item.root;select.add(option);
+  }
+  if(items.some(item=>item.root===preferred))select.value=preferred;
+  document.querySelectorAll('[data-dataset-category]').forEach(button=>{
+    const key=button.dataset.datasetCategory,count=datasetItems.filter(item=>key==='all'||datasetCategoryOf(item)===key).length;
+    button.textContent=datasetCategories[key]+' '+count;button.setAttribute('aria-pressed',String(key===datasetCategory));
+  });
+  if($('dataset-filter-summary'))$('dataset-filter-summary').textContent=`${items.length} 份 · 时间倒序（新 → 旧）`;
+  try{localStorage.setItem('so101-dataset-category',datasetCategory);}catch{}
+}
+function revealDatasetChoice(root){
+  const item=datasetItems.find(d=>d.root===root);if(!item)return false;
+  if(datasetCategory!=='all'&&datasetCategoryOf(item)!==datasetCategory)datasetCategory=datasetCategoryOf(item);
+  if(!datasetMatchesSearch(item))$('dataset-search').value='';
+  renderDatasetChoices(root);return true;
+}
+function installDatasetPicker(){
+  try{const saved=localStorage.getItem('so101-dataset-category');if(Object.hasOwn(datasetCategories,saved))datasetCategory=saved;}catch{}
+  const picker=document.createElement('div');picker.className='dataset-picker-filters';
+  picker.innerHTML='<div id="dataset-category-buttons" class="dataset-category-buttons" role="group" aria-label="数据集分类"></div><input id="dataset-search" type="search" placeholder="搜索任务、备注或名称" aria-label="搜索数据集"><p id="dataset-filter-summary" class="field-help"></p><p class="field-help dataset-category-help">可训练：已保存且人工标为可训练。原始：其余未排除的 raw；处理待审、排除和未分类在「处理 / 其他」。分类不改动文件。</p>';
+  $('dataset-select').closest('label').before(picker);
+  for(const [key,label] of Object.entries(datasetCategories)){
+    const button=document.createElement('button');button.type='button';button.className='button subtle';button.dataset.datasetCategory=key;button.textContent=label;
+    button.addEventListener('click',()=>{datasetCategory=key;filterChanged();});$('dataset-category-buttons').append(button);
+  }
+  function filterChanged(){
+    const previous=$('dataset-select').value;renderDatasetChoices();
+    if(previous&&!$('dataset-select').value)handle(openDataset(''));
+    updateControls();
+  }
+  $('dataset-search').addEventListener('input',filterChanged);renderDatasetChoices();
+}
 async function ensureDatasetNaming(){
   if(datasetNamingReady)return datasetNamingReady;
   datasetNamingReady=(async()=>{

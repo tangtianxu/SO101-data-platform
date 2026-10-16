@@ -328,10 +328,10 @@ $('reference-reset').addEventListener('click',()=>handle((async()=>{if(await con
 for(const [id,success] of [['act-success',true],['act-failure',false]])$(id).addEventListener('click',()=>handle(api('/api/result',{success}).then(()=>{toast('已保存人工判断，不自动分析录像。');return refreshFeedback();})));
 
 async function refreshDatasets(){
-  const items=await api('/api/datasets'),select=$('dataset-select'),previous=select.value;datasetItems=items;
-  select.replaceChildren(new Option('请选择数据集',''));
-  items.forEach(d=>{const option=new Option(datasetOptionLabel(d)+(d.protected?' · 保留':''),d.root);option.title=d.naming?.display_name+'\n'+d.root;select.add(option);});
-  if(items.some(d=>d.root===previous))select.value=previous;
+  const items=await api('/api/datasets'),previous=$('dataset-select').value;
+  datasetItems=sortDatasetItems(items);
+  if(previous&&datasetItems.some(d=>d.root===previous))revealDatasetChoice(previous);
+  else{renderDatasetChoices();if(library)await openDataset('');}
   const archives=await api('/api/archives'), archiveSelect=$('archive-select');
   archiveSelect.replaceChildren(new Option('选择已删除的数据集',''));
   archives.forEach(d=>archiveSelect.add(new Option(d.name+' · '+d.created.slice(0,16),d.manifest)));
@@ -361,6 +361,7 @@ $('restore-dataset').addEventListener('click',()=>handle((async()=>{
 $('refresh-datasets').addEventListener('click',()=>handle(refreshDatasets().then(()=>toast('数据集列表已刷新'))));
 $('dataset-select').addEventListener('change',()=>handle(openDataset($('dataset-select').value)));
 async function openDataset(root){
+  if(root&&!revealDatasetChoice(root))throw Error('该数据集已不在列表中，请刷新列表');
   pausePlayback(); selectedEpisode=null;cropPlan=null;
   if(!root){library=null;renderEpisodeList();$('dataset-summary').textContent='尚未打开数据集';renderDatasetNaming(null);$('episode-content').classList.add('hidden');$('dataset-empty').classList.remove('hidden');return;}
   const item=datasetItems.find(d=>d.root===root);
@@ -644,6 +645,7 @@ async function loadStartPose(path){
   $('reset-pose-note').textContent='角度和夹爪百分比显示两位小数；未编辑的数值仍保留文件原精度，不改写原文件。';
   $('reset-source').textContent=pose.source_dataset?`当前起点来源：${pose.source_dataset}，第 ${pose.source_episode_zero_based+1} 条实测首帧。不是舵机中位。`:'当前起点来源：'+pose.source+'。保存目标不代表复位路径已通过碰撞验证。';
 }
+installDatasetPicker();
 installResetSettings();
 installFeedbackHistory();
 installJointControls();

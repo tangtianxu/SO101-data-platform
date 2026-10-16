@@ -150,3 +150,52 @@ test('new control-page entry respects missing portable teleop configuration',asy
   f.snapshot.capabilities.teleop={ready:false,reason:'missing leader binding'};f.render();
   assert.equal(f.$('control-teleop').disabled,true);assert.match(f.$('control-teleop').title,/missing leader binding/);
 });
+
+function dataset(name,stage,review,time,extra={}){
+  const spec={stage,review,domain:'real',started_at:'2026-10-16T10:10',instruction:'把娃娃放进盒子',description:name,note:''};
+  return {name,root:'QA/'+name,ready:true,episodes:3,sort_time:time,naming:{spec,simple_spec:spec,display_name:name,append_allowed:stage==='raw'},...extra};
+}
+function loadItems(f,items){f.w.__items=structuredClone(items);f.run('datasetItems=sortDatasetItems(window.__items);renderDatasetChoices();');}
+function roots(f){return Array.from(f.$('dataset-select').options,o=>o.value).filter(Boolean);}
+function category(f,key){f.w.document.querySelector('[data-dataset-category="'+key+'"]').click();}
+
+test('dataset picker separates raw, approved training and processed/other without changing labels',async t=>{
+  const f=await fixture(t),items=[dataset('raw','raw','pending',1),dataset('train','processed','train',2),dataset('pending','processed','pending',3),dataset('excluded','raw','exclude',4),dataset('raw-approved','raw','train',5),dataset('unknown','','',6,{naming:{}})];
+  loadItems(f,items);assert.deepEqual(roots(f),['QA/raw']);
+  category(f,'train');assert.deepEqual(roots(f),['QA/raw-approved','QA/train']);
+  category(f,'other');assert.deepEqual(roots(f),['QA/unknown','QA/excluded','QA/pending']);
+  category(f,'all');assert.equal(roots(f).length,6);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(datasetItems)')),items.slice().sort((a,b)=>b.sort_time-a.sort_time));
+  assert.equal(f.posted().length,0);
+});
+test('dataset choices are newest first within every category, not filename sorted',async t=>{
+  const f=await fixture(t);loadItems(f,[dataset('z-old','raw','pending',1),dataset('a-new','raw','pending',100),dataset('b-mid','raw','pending',50)]);
+  assert.deepEqual(roots(f),['QA/a-new','QA/b-mid','QA/z-old']);assert.match(f.$('dataset-filter-summary').textContent,/时间倒序/);
+  assert.equal(f.$('dataset-select').value,'');
+});
+test('dataset search matches task, description, notes and physical name',async t=>{
+  const f=await fixture(t),item=dataset('CustomName','raw','pending',1);item.naming.simple_spec.note='变化娃娃位置';
+  loadItems(f,[item]);
+  for(const query of ['customname','娃娃','变化娃娃位置']){f.input('dataset-search',query);assert.deepEqual(roots(f),['QA/CustomName']);}
+  f.input('dataset-search','no-match');assert.deepEqual(roots(f),[]);assert.equal(f.$('dataset-select').options[0].text,'没有匹配的数据集');
+  f.input('dataset-search','');assert.equal(roots(f).length,1);assert.equal(f.posted().length,0);
+});
+test('crop/source navigation reveals the destination category and clears blocking search',async t=>{
+  const f=await fixture(t);loadItems(f,[dataset('raw','raw','pending',1),dataset('crop','processed','pending',2)]);
+  f.input('dataset-search','raw');assert.equal(f.run('revealDatasetChoice("QA/crop")'),true);
+  assert.equal(f.run('datasetCategory'),'other');assert.equal(f.$('dataset-search').value,'');assert.equal(f.$('dataset-select').value,'QA/crop');
+  assert.equal(f.run('revealDatasetChoice("QA/raw")'),true);assert.equal(f.run('datasetCategory'),'raw');assert.equal(f.$('dataset-select').value,'QA/raw');
+  assert.equal(f.run('revealDatasetChoice("QA/missing")'),false);assert.equal(f.posted().length,0);
+});
+test('refresh keeps selected dataset after reclassification and new count/order is updated',async t=>{
+  const f=await fixture(t),item=dataset('reviewed','raw','pending',1);loadItems(f,[item]);f.run('revealDatasetChoice("QA/reviewed");');
+  const approved=dataset('reviewed','processed','train',1),next=dataset('new-training','processed','train',2),fetch=f.w.fetch;
+  f.w.fetch=async(url,opts)=>url==='/api/datasets'?{ok:true,json:async()=>[approved,next]}:url==='/api/archives'?{ok:true,json:async()=>[]}:fetch(url,opts);
+  await f.run('refreshDatasets()');assert.equal(f.run('datasetCategory'),'train');assert.equal(f.$('dataset-select').value,'QA/reviewed');
+  assert.deepEqual(roots(f),['QA/new-training','QA/reviewed']);assert.match(f.w.document.querySelector('[data-dataset-category="train"]').textContent,/2/);
+});
+test('clearing a filtered-out selection clears stale review and archive state',async t=>{
+  const f=await fixture(t);loadItems(f,[dataset('raw','raw','pending',1),dataset('train','processed','train',2)]);
+  f.run('revealDatasetChoice("QA/raw");library={root:"QA/raw",episodes:[]};');category(f,'train');await pause(0);
+  assert.equal(f.$('dataset-select').value,'');assert.equal(f.run('library'),null);assert.equal(f.$('archive-dataset').disabled,true);
+});
