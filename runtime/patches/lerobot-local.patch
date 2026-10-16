@@ -1,0 +1,124 @@
+diff --git a/src/lerobot/common/train_utils.py b/src/lerobot/common/train_utils.py
+index a300cc7..f5b4c39 100644
+--- a/src/lerobot/common/train_utils.py
++++ b/src/lerobot/common/train_utils.py
+@@ -13,6 +13,7 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import logging
+ from pathlib import Path
+ 
+ from huggingface_hub import HfApi, snapshot_download
+@@ -97,8 +98,20 @@ def update_last_checkpoint(checkpoint_dir: Path) -> Path:
+     last_checkpoint_dir = checkpoint_dir.parent / LAST_CHECKPOINT_LINK
+     if last_checkpoint_dir.is_symlink():
+         last_checkpoint_dir.unlink()
++    elif getattr(last_checkpoint_dir, "is_junction", lambda: False)():
++        # Windows directory junctions can be created without symlink privileges.
++        last_checkpoint_dir.rmdir()
+     relative_target = checkpoint_dir.relative_to(checkpoint_dir.parent)
+-    last_checkpoint_dir.symlink_to(relative_target)
++    try:
++        last_checkpoint_dir.symlink_to(relative_target, target_is_directory=True)
++    except OSError as exc:
++        if getattr(exc, "winerror", None) != 1314:
++            raise
++        # The numbered checkpoint was already saved; a missing convenience link
++        # must not stop a training run on Windows without symlink privileges.
++        logging.warning(
++            "Could not create 'last' checkpoint link without Windows symlink privileges; use the numbered checkpoint."
++        )
+ 
+ 
+ def save_checkpoint(
+diff --git a/src/lerobot/scripts/lerobot_record.py b/src/lerobot/scripts/lerobot_record.py
+index 532a8c6..d7c0fa8 100644
+--- a/src/lerobot/scripts/lerobot_record.py
++++ b/src/lerobot/scripts/lerobot_record.py
+@@ -186,6 +186,8 @@ class RecordConfig:
+     display_compressed_images: bool = False
+     # Use vocal synthesis to read events.
+     play_sounds: bool = True
++    # Allow stopping the session with Esc/q while ignoring episode navigation keys when False.
++    allow_episode_navigation: bool = True
+     # Resume recording on an existing dataset.
+     resume: bool = False
+ 
+@@ -459,7 +461,7 @@ def record(
+             teleop.connect()
+         robot.connect()
+ 
+-        listener, events = init_keyboard_listener()
++        listener, events = init_keyboard_listener(allow_episode_navigation=cfg.allow_episode_navigation)
+ 
+         if not cfg.dataset.streaming_encoding:
+             logging.info(
+@@ -469,7 +471,8 @@ def record(
+         with VideoEncodingManager(dataset):
+             recorded_episodes = 0
+             while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+-                log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
++                logging.info("Recording episode %s", dataset.num_episodes)
++                log_say("START", cfg.play_sounds, blocking=True)
+                 record_loop(
+                     robot=robot,
+                     events=events,
+@@ -485,13 +488,14 @@ def record(
+                     display_mode=cfg.display_mode,
+                     display_compressed_images=display_compressed_images,
+                 )
++                log_say("END", cfg.play_sounds, blocking=True)
+ 
+                 # Execute a few seconds without recording to give time to manually reset the environment
+                 # Skip reset for the last episode to be recorded
+                 if not events["stop_recording"] and (
+                     (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                 ):
+-                    log_say("Reset the environment", cfg.play_sounds)
++                    logging.info("Reset the environment")
+ 
+                     record_loop(
+                         robot=robot,
+diff --git a/src/lerobot/utils/keyboard_input.py b/src/lerobot/utils/keyboard_input.py
+index 00c0f53..11d8957 100644
+--- a/src/lerobot/utils/keyboard_input.py
++++ b/src/lerobot/utils/keyboard_input.py
+@@ -393,7 +393,7 @@ def create_key_listener(dispatch: Callable[[str], None], *, controls_help: str =
+     return None
+ 
+ 
+-def init_keyboard_listener():
++def init_keyboard_listener(allow_episode_navigation: bool = True):
+     """Initialize a non-blocking keyboard listener for interactive recording controls.
+ 
+     Backend selection:
+@@ -408,7 +408,9 @@ def init_keyboard_listener():
+       the episode/reset timers (or Ctrl+C).
+ 
+     Both backends accept the same controls: Right/Left/Esc, plus the single-byte letter
+-    equivalents ``n`` (next), ``r`` (re-record) and ``q`` (quit). The letters are the most
++    equivalents ``n`` (next), ``r`` (re-record) and ``q`` (quit). Set
++    ``allow_episode_navigation=False`` to ignore Right/Left/n/r while retaining Esc/q.
++    The letters are the most
+     reliable choice over high-latency SSH/VNC links, where arrow-key escape sequences can
+     be split, delayed, or intercepted by the terminal.
+ 
+@@ -428,13 +430,14 @@ def init_keyboard_listener():
+     # over laggy SSH/VNC links. Case-insensitive so Shift+letter still works.
+     def on_key(name: str) -> None:
+         key = name.lower()
+-        if key in ("right", "n"):
++        if allow_episode_navigation and key in ("right", "n"):
+             apply_recording_control("right", events)
+-        elif key in ("left", "r"):
++        elif allow_episode_navigation and key in ("left", "r"):
+             apply_recording_control("left", events)
+         elif key in ("esc", "q"):
+             apply_recording_control("esc", events)
+         # other keys (incl. up/down) are intentionally ignored
+ 
+-    listener = create_key_listener(on_key, controls_help="Right/Left/Esc, or n=next, r=re-record, q=quit")
++    controls_help = "Right/Left/Esc, or n=next, r=re-record, q=quit" if allow_episode_navigation else "Esc or q=quit"
++    listener = create_key_listener(on_key, controls_help=controls_help)
+     return listener, events

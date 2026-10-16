@@ -1,0 +1,7 @@
+.software-limits-card{border-top:1px solid var(--line);margin-top:0}
+.software-limits-card>summary{cursor:pointer;padding:16px 20px;color:#506778;font-weight:500}
+.software-limits-body{padding:0 20px 18px}
+.software-limits-body>.field-help{margin:0 0 14px;line-height:1.8}
+.software-limits-body table{min-width:640px}
+.software-limits-body td input{max-width:150px}
+.software-limits-body .target-actions{padding-left:0;padding-right:0;flex-wrap:wrap}

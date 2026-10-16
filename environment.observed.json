@@ -1,0 +1,36 @@
+{
+  "kind": "observed_development_environment_not_an_install_lock",
+  "observed_date": "2026-10-16",
+  "platform": "Windows",
+  "python": "3.12.14",
+  "hardware_environment": {
+    "lerobot": "0.6.1",
+    "lerobot_checkout_short_commit": "7e241bd",
+    "uncommitted_dependency_changes": "runtime/patches/lerobot-local.patch",
+    "torch": "2.11.0+cu128",
+    "torchvision": "0.26.0+cu128",
+    "numpy": "2.2.6",
+    "pyserial": "3.5",
+    "feetech-servo-sdk": "1.0.0",
+    "datasets": "4.8.5",
+    "pyarrow": "25.0.1",
+    "pandas": "2.3.3",
+    "av": "15.1.0",
+    "torchcodec": "0.11.1",
+    "safetensors": "0.8.0",
+    "draccus": "0.11.6",
+    "pynput": "1.8.2",
+    "rerun-sdk": "0.33.1",
+    "opencv-python-headless": "4.13.0.92"
+  },
+  "ui_environment": {
+    "python": "3.12.14",
+    "pywebview": "6.2.1",
+    "pythonnet": "3.2.1",
+    "clr-loader": "0.3.1",
+    "bottle": "0.13.4",
+    "browser_runtime": "System Microsoft Edge WebView2"
+  },
+  "installation_verified_on_a_fresh_machine": false,
+  "original_offline_tests": {"count": 102, "result": "passed", "hardware_accessed": false}
+}
