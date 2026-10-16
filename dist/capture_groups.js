@@ -1,17 +1,21 @@
 'use strict';
 let captureCollections=[],ungroupedCount=null,captureGroupTimer;
+function captureEpisodeCount(value,name='条数'){
+  const count=Number(value);
+  if(typeof value==='boolean'||!Number.isSafeInteger(count)||count<1)throw Error(name+' 应为正整数，且不能超出系统可精确表示的整数范围');
+  return count;
+}
 function groupingAllowed(){return $('record-target-mode').value==='new'||captureCollections.some(c=>c.root===$('record-existing').value);}
 function captureGroupPlan(){
   if(!groupingAllowed())return [];
   const merged=new Map();
   for(const row of $('capture-group-rows').children){
     const task=row.querySelector('[data-group-task]').value.trim();if(!task)continue;
-    const text=row.querySelector('[data-group-count]').value.trim(),count=Number(text);
+    const count=captureEpisodeCount(row.querySelector('[data-group-count]').value,'每组条数');
     if(task.length>300)throw Error('每组指令最多 300 字');
-    if(!text||!Number.isInteger(count)||count<1||count>30)throw Error('每组数量需为 1–30 的整数');
     merged.set(task,(merged.get(task)||0)+count);
   }
-  if([...merged.values()].reduce((a,b)=>a+b,0)>30)throw Error('本次各组合计最多 30 条，请分批采集');
+  if(merged.size)captureEpisodeCount([...merged.values()].reduce((a,b)=>a+b,0),'本次总条数');
   return [...merged].map(([instruction,episodes])=>({instruction,episodes}));
 }
 function capturePlanInstruction(){const groups=captureGroupPlan();return groups.length>1?'分组采集':groups[0]?.instruction||$('record-task').value.trim();}
@@ -35,11 +39,11 @@ function updateCaptureGroupControls(){
 }
 function installCaptureGroupPlan(){
   const panel=$('record-groups-plan');
-  panel.innerHTML='<summary>按语言指令分组（可选）</summary><p class="field-help">每组填写数量和指令。空指令行忽略，全部留空则不分组；本次各组合计上限仍为 30 条。</p><div id="capture-group-rows"></div><button id="add-capture-group" type="button" class="button subtle">＋ 添加指令小组</button><p id="capture-group-hint" class="field-help"></p>';
+  panel.innerHTML='<summary>按语言指令分组（可选）</summary><p class="field-help">每组填写正整数条数和指令，总条数自动合计。空指令行忽略，全部留空则不分组。</p><div id="capture-group-rows"></div><button id="add-capture-group" type="button" class="button subtle">＋ 添加指令小组</button><p id="capture-group-hint" class="field-help"></p>';
   function changed(){updateCaptureGroupControls();clearTimeout(captureGroupTimer);captureGroupTimer=setTimeout(()=>{if(recordNameForm&&$('record-target-mode').value==='new')recordNameForm.update();},200);}
   $('add-capture-group').addEventListener('click',()=>{
     const row=document.createElement('div');row.className='capture-group-row';
-    row.innerHTML='<label>数量<input data-group-count type="number" min="1" max="30" step="1" value="5" aria-label="小组采集数量"></label><label>小组语言指令<textarea data-group-task rows="2" maxlength="300" placeholder="例如：把娃娃放进盒子" aria-label="小组语言指令"></textarea></label><button type="button" class="button subtle" data-group-remove aria-label="移除此小组">移除</button>';
+    row.innerHTML='<label>数量<input data-group-count type="number" min="1" step="1" value="5" aria-label="小组采集数量"></label><label>小组语言指令<textarea data-group-task rows="2" maxlength="300" placeholder="例如：把娃娃放进盒子" aria-label="小组语言指令"></textarea></label><button type="button" class="button subtle" data-group-remove aria-label="移除此小组">移除</button>';
     row.querySelector('[data-group-remove]').addEventListener('click',()=>{row.remove();changed();});
     row.addEventListener('input',changed);$('capture-group-rows').append(row);changed();row.querySelector('[data-group-task]').focus();
   });

@@ -295,9 +295,10 @@ $('hardware-mode').addEventListener('click',()=>handle((async()=>{
   }
 })()));
 $('prepare-record').addEventListener('click',()=>handle((async()=>{
-  const plan=await captureNaming(),{root,existing}=plan;
   const instruction_groups=captureGroupPlan();
-  await startJob('record',{capture_mode:plan.mode,parent:plan.parent,dataset_root:root,dataset_spec:plan.spec,task:$('record-task').value,instruction_groups,episodes:Number($('record-count').value),record_seconds:Number($('record-duration').value),reset_seconds:Number($('reset-duration').value),group:$('record-group').value,append_confirmed:existing});
+  const episodes=captureEpisodeCount(instruction_groups.length?instruction_groups.reduce((sum,g)=>sum+g.episodes,0):$('record-count').value);
+  const plan=await captureNaming(),{root,existing}=plan;
+  await startJob('record',{capture_mode:plan.mode,parent:plan.parent,dataset_root:root,dataset_spec:plan.spec,task:$('record-task').value,instruction_groups,episodes,record_seconds:Number($('record-duration').value),reset_seconds:Number($('reset-duration').value),group:$('record-group').value,append_confirmed:existing});
 })()));
 $('prepare-teleop').addEventListener('click',()=>handle(startJob('teleop')));
 $('control-teleop').addEventListener('click',()=>handle(startJob('teleop')));

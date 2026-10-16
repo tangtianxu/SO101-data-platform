@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from capture_counts import episode_count
 
 HERE = Path(__file__).resolve().parent
 STATE_DIR = HERE / "state"
@@ -153,7 +154,8 @@ def validate_config(raw):
         cfg[key] = number(cfg[key], 0, 63, key, True)
     if cfg["top_camera"] == cfg["wrist_camera"]:
         raise ValueError("Top 和 Wrist 必须是不同设备")
-    for key, lo, hi in (("preview_hz", 1, 10), ("episodes", 1, 1000), ("record_seconds", 1, 120),
+    cfg["episodes"] = episode_count(cfg["episodes"])
+    for key, lo, hi in (("preview_hz", 1, 10), ("record_seconds", 1, 120),
                         ("reset_seconds", 1, 120), ("sensor_hz", 1, 30), ("server_port", 1024, 65535)):
         cfg[key] = number(cfg[key], lo, hi, key, True)
     from reset_profile import validate_settings

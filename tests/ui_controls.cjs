@@ -257,8 +257,8 @@ test('group plan merges identical instructions, totals counts and restores ungro
   assert.equal(f.$('record-count').value,'5');assert.equal(f.$('record-count').readOnly,false);
 });
 test('invalid group counts are rejected and existing flat datasets do not gain nested groups',async t=>{
-  const f=await fixture(t);addGroup(f,'抓娃娃',20);addGroup(f,'抓布块',20);
-  assert.throws(()=>f.run('captureGroupPlan()'),/最多 30/);assert.equal(f.$('capture-group-hint').classList.contains('error'),true);
+  const f=await fixture(t);addGroup(f,'抓娃娃',0);addGroup(f,'抓布块',20);
+  assert.throws(()=>f.run('captureGroupPlan()'),/正整数/);assert.equal(f.$('capture-group-hint').classList.contains('error'),true);
   loadItems(f,[dataset('flat','raw','pending',1)]);f.run('refreshRecordTargets();');
   f.$('record-target-mode').value='existing';f.$('record-existing').value='QA/flat';f.run('recordTargetChanged();');
   assert.equal(f.$('add-capture-group').disabled,true);assert.deepEqual(JSON.parse(f.run('JSON.stringify(captureGroupPlan())')),[]);
@@ -276,4 +276,46 @@ test('group status shows current instruction and explicit next-group start witho
   f.render();assert.equal(f.$('start-session').textContent,'开始第 2 组（5 条）');assert.match(f.$('phase-message').textContent,/抓布块/);
   assert.match(f.$('phase-count').textContent,/小组 2\/2/);f.$('start-session').click();await pause(0);assert.equal(f.$('confirm-dialog').open,false);
   assert.equal(f.posted()[0].body.command,'start');
+});
+
+test('single total and each instruction group accept 50, 200 and larger plans',async t=>{
+  const f=await fixture(t);
+  assert.equal(f.$('record-count').hasAttribute('max'),false);
+  for(const count of [31,50,200,10000]){
+    f.$('record-count').value=String(count);assert.equal(f.$('record-count').checkValidity(),true);
+    assert.equal(f.run('captureEpisodeCount($("record-count").value)'),count);
+  }
+  f.$('record-count').value='200';
+  const a=addGroup(f,'抓娃娃',50),b=addGroup(f,'抓布块',150);
+  assert.equal(a.querySelector('[data-group-count]').hasAttribute('max'),false);
+  assert.equal(f.$('record-count').value,'200');assert.equal(f.$('capture-group-hint').classList.contains('error'),false);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(captureGroupPlan())')),[{instruction:'抓娃娃',episodes:50},{instruction:'抓布块',episodes:150}]);
+  b.querySelector('[data-group-task]').value='抓娃娃';b.dispatchEvent(new f.w.Event('input',{bubbles:true}));
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(captureGroupPlan())')),[{instruction:'抓娃娃',episodes:200}]);
+  assert.equal(f.posted().length,0);
+});
+
+test('invalid single count is rejected before plan request or device handoff',async t=>{
+  const f=await fixture(t);
+  for(const value of ['','0','-1','1.2','9007199254740992']){
+    f.$('record-count').value=value;f.$('prepare-record').disabled=false;f.$('prepare-record').click();await pause(0);
+    assert.match(f.$('toast').textContent,/正整数/);assert.equal(f.calls.length,0);
+  }
+});
+
+test('record preparation submits 50 and 200 unchanged to the fake backend',async t=>{
+  for(const count of [50,200]){
+    const f=await fixture(t);await initializeNaming(f);
+    f.snapshot.active=false;f.snapshot.resources_active=false;f.render();f.run('setView("capture")');
+    f.$('record-count').value=String(count);f.$('prepare-record').click();
+    await until(()=>f.posted().some(c=>c.url==='/api/jobs'));
+    const jobs=f.posted().filter(c=>c.url==='/api/jobs');
+    assert.equal(jobs.length,1);assert.equal(jobs[0].body.kind,'record');
+    assert.equal(jobs[0].body.options.episodes,count);assert.deepEqual(jobs[0].body.options.instruction_groups,[]);
+  }
+});
+
+test('group total rejects integer precision overflow instead of rounding',async t=>{
+  const f=await fixture(t);addGroup(f,'抓娃娃',Number.MAX_SAFE_INTEGER);addGroup(f,'抓布块',1);
+  assert.throws(()=>f.run('captureGroupPlan()'),/整数范围/);assert.equal(f.$('capture-group-hint').classList.contains('error'),true);
 });

@@ -8,6 +8,7 @@ from unittest.mock import Mock,patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from common import ROBOT_HOME,load_config
+from capture_counts import MAX_EPISODES
 import dataset_naming as naming
 from dataset_library import list_datasets
 import capture_groups as groups
@@ -38,10 +39,21 @@ class CaptureGroupTests(unittest.TestCase):
         self.assertEqual(cfg['task'],'A');self.assertEqual(plan['targets'][0]['instruction'],'A')
 
     def test_invalid_counts_and_legacy_episode_overrides_fail_before_writing(self):
-        for count in (0,31,True,1.2,None):
+        for count in (0,-1,MAX_EPISODES+1,True,1.2,None):
             with self.subTest(count=count),self.assertRaises(ValueError):self.plan([{'instruction':'A','episodes':count}])
-        with self.assertRaises(ValueError):self.plan([{'instruction':'A','episodes':20},{'instruction':'B','episodes':20}])
+        with self.assertRaises(ValueError):self.plan([{'instruction':'A','episodes':MAX_EPISODES},{'instruction':'B','episodes':1}])
         with self.assertRaises(ValueError):self.plan([],episode_tasks=['A'])
+        self.assertEqual(list(Path(self.cfg['dataset_home']).iterdir()),[])
+
+    def test_large_flat_and_grouped_plans_are_accepted_without_creating_data(self):
+        for count in (31,50,200,10000):
+            with self.subTest(count=count):
+                plan,cfg,_=self.plan([],episodes=count)
+                self.assertIsNone(plan);self.assertEqual(cfg['episodes'],count)
+                plan,cfg,_=self.plan([{'instruction':'A','episodes':count}])
+                self.assertEqual(cfg['episodes'],count);self.assertEqual(plan['targets'][0]['episodes'],count)
+        plan,cfg,_=self.plan([{'instruction':'A','episodes':20},{'instruction':'A','episodes':30},{'instruction':'B','episodes':150}])
+        self.assertEqual(cfg['episodes'],200);self.assertEqual([t['episodes'] for t in plan['targets']],[50,150])
         self.assertEqual(list(Path(self.cfg['dataset_home']).iterdir()),[])
 
     def test_new_group_plan_is_read_only_until_commit_and_visible_as_children(self):
@@ -133,6 +145,18 @@ class CaptureGroupTests(unittest.TestCase):
         for _ in range(3):lease.connect();lease.disconnect();listener.stop()
         device.connect.assert_called_once();device.disconnect.assert_not_called();device.stop.assert_not_called()
         device.disconnect();device.stop();self.assertEqual(device.disconnect.call_count,1)
+
+    def test_large_flat_count_reaches_worker_request_without_actual_worker(self):
+        from server import Platform
+        for count in (50,200):
+            cfg={**self.cfg,'log_home':str(self.base/'logs')}
+            with patch('server.load_config',return_value=cfg):app=Platform(offline=False)
+            fake=Mock();fake.pid=123;fake.poll.return_value=0
+            with patch('server.require_capability',create=True),patch('server.subprocess.Popen',return_value=fake),patch('server.threading.Thread'):
+                app.start({'kind':'record','options':{'capture_mode':'new','task':'抓娃娃','episodes':count}})
+            request=json.loads(fake.stdin.write.call_args.args[0])
+            self.assertEqual(request['config']['episodes'],count)
+            self.assertEqual(request['options']['episodes'],count)
 
 
 if __name__=='__main__':unittest.main()

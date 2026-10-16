@@ -8,10 +8,10 @@ import json
 from pathlib import Path
 
 from common import atomic_json, number, robot_path
+from capture_counts import episode_count
 from dataset_naming import capture_plan, describe, filename_text, registry, simple_defaults, store_metadata, validate_capture
 
 MARKER='.capture-groups.json'
-MAX_EPISODES=30  # Retain the existing per-session limit, including all groups.
 
 
 def normalize_groups(value):
@@ -25,10 +25,9 @@ def normalize_groups(value):
         task=task.strip()
         if not task:continue
         if len(task)>300:raise ValueError('每组语言指令最多 300 字')
-        try:count=number(row.get('episodes'),1,MAX_EPISODES,'每组条数',True)
-        except (TypeError,OverflowError):raise ValueError('每组条数应为 1–30 的整数') from None
+        count=episode_count(row.get('episodes'),'每组条数')
         merged[task]=merged.get(task,0)+count
-    if sum(merged.values())>MAX_EPISODES:raise ValueError('本次所有小组合计最多 30 条，请分批采集')
+    if merged:episode_count(sum(merged.values()),'本次总条数')
     return [{'instruction':task,'episodes':count} for task,count in merged.items()]
 
 
@@ -114,7 +113,7 @@ def prepare_record(cfg,payload):
     cfg['task']=groups[0]['instruction'] if groups else str(payload.get('task',cfg['task'])).strip()
     if not cfg['task'] or len(cfg['task'])>300:raise ValueError('需要 1–300 字的默认语言指令')
     payload['group']=str(payload.get('group') or '固定位置').strip()[:100]
-    cfg['episodes']=sum(g['episodes'] for g in groups) if groups else number(payload.get('episodes',cfg['episodes']),1,30,'条数',True)
+    cfg['episodes']=episode_count(sum(g['episodes'] for g in groups) if groups else payload.get('episodes',cfg['episodes']))
     mode=payload.get('capture_mode');new=mode=='new'
     if new:
         instruction=('分组采集' if len(groups)>1 else groups[0]['instruction']) if groups else cfg['task']
