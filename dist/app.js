@@ -58,7 +58,7 @@ function setView(next) {
   $('datasets-page').classList.toggle('hidden',next!=='datasets');
   $('settings-page').classList.toggle('hidden',next!=='settings');
   $('joint-control-panel').classList.toggle('hidden',next!=='control');
-  for(const id of ['approve-scene','start-session','end-episode','end-reset','shortcut-hint'])$(id).hidden=next==='control';
+  updateSessionActions();
   document.querySelectorAll('[data-inspector]').forEach(el=>el.classList.toggle('hidden',el.dataset.inspector!==next));
   $('workspace-title').textContent=names[next];
   $('workspace-subtitle').textContent={capture:'先检查画面并同步，再连续采集。录制与复位阶段始终清楚可见。',control:'按需连接设备。点动、保持与释放力矩均是明确的独立操作。',act:'调用现有 ACT 流程，显示真实执行状态。任务结果由操作者判断。'}[next]||'';
@@ -96,6 +96,21 @@ function updateTelemetry(t, active) {
   });
   $('telemetry-hint').textContent=t.state?(active?'真实设备反馈'+(t.effective_hz?` · ${t.effective_hz.toFixed(1)} Hz`:''):'上次会话最终数据 · 非实时'):'尚未读取真实设备';
 }
+function updateSessionActions(){
+  const control=view==='control',sessionVisible=!control||['teleop','replay'].includes(state?.job?.kind);
+  if(!$('motion-guidance')){
+    const note=document.createElement('p');note.id='motion-guidance';note.className='field-help';
+    note.textContent='点击同步即开始运动：先核对双相机画面、固定从臂、扶稳主臂，并移开从臂路径上的手和支撑。同步后点击开始，不再重复弹窗。';
+    $('approve-scene').before(note);
+  }
+  $('motion-guidance').hidden=!sessionVisible||['act','replay'].includes(state?.job?.kind);
+  for(const id of ['approve-scene','start-session'])$(id).hidden=!sessionVisible;
+  $('approve-scene').title='点击即开始低速同步：请先核对双相机画面、固定从臂、扶稳主臂，并移开从臂运动路径上的手和支撑。';
+  for(const id of ['end-episode','end-reset','shortcut-hint'])$(id).hidden=control;
+}
+function canPrepareTeleoperation(){
+  return !state?.active||(['monitor','control'].includes(state.job?.kind)&&['MONITOR','CONTROL'].includes(state.job?.phase)&&!state.job?.target_pending);
+}
 function updateControls() {
   if(!state)return;
   const active=state.active, job=state.job, phase=job?.phase||'', offline=state.offline||runtimeMismatch||state.identity?.source_changed||state.restart_required;
@@ -103,6 +118,11 @@ function updateControls() {
   const prepare=['prepare-record','prepare-teleop','prepare-act','scan-cameras','monitor-device','connect-control','prepare-replay','act-reset-only'];
   document.querySelectorAll('.hardware').forEach(el=>{el.disabled=!!offline; el.title=offline?'本次离线验收已锁定硬件入口':'';});
   prepare.forEach(id=>{$(id).disabled=offline||active||requestBusy;});
+  for(const id of ['prepare-teleop','control-teleop']){
+    $(id).disabled=!!(offline||requestBusy||!canPrepareTeleoperation());
+    $(id).title='先正常结束监控/基本控制并交接设备，再检查画面、缓慢同步；不录制。';
+  }
+  updateSessionActions();
   $('scan-cameras').disabled=offline||active||preview||requestBusy;
   const taskOwnsCameras=active&&!['monitor','control'].includes(job.kind);
   $('preview-cameras').disabled=preview?requestBusy||!!state.preview_job?.stopping:offline||taskOwnsCameras||requestBusy;
@@ -110,7 +130,7 @@ function updateControls() {
   $('preview-cameras').title=taskOwnsCameras?'当前任务独占设备；监控、基本控制可与独立相机预览并行':'只打开或关闭相机，不连接机械臂，也不改变力矩';
   $('disconnect-device').disabled=!active||!['monitor','control'].includes(job.kind)||requestBusy;
   $('camera-session-hint').textContent=(preview?'相机：独立预览运行中':state.camera_active?'相机：由当前任务提供画面':'相机：未开启')+' · '+(active&&['monitor','control'].includes(job.kind)?'从臂：'+(job.kind==='monitor'?'只读监控':'基本控制'):'从臂：无独立控制连接');
-  $('stop-all').disabled=!resources;
+  $('stop-all').disabled=!resources&&!requestBusy;
   $('approve-scene').disabled=offline||!active||phase!=='SCENE_CHECK';
   $('start-session').disabled=offline||!active||!['WAITING_START','READY','REPLAY_READY'].includes(phase);
   $('start-session').textContent=job?.kind==='act'?'开始 ACT（复位后执行）':job?.kind==='teleop'?'进入正式遥操':job?.kind==='replay'?'开始低速对齐与回放':'开始本批采集';
@@ -121,7 +141,7 @@ function updateControls() {
   $('hold-position').disabled=offline||(!control&&!(active&&job.kind==='act'&&phase==='READY'));
   for(const id of ['quick-hold','quick-release']){
     $(id).disabled=offline||requestBusy||(active&&!control);
-    $(id).title=offline?'离线模式已锁定；可手动解锁':active&&!control?'先停止采集 / 遥操，再进行独立力矩操作；不会在录制中突然释放':'显式确认后才操作，不会在打开页面时自动连接';
+    $(id).title=offline?'离线模式已锁定；可手动解锁':active&&!control?'先停止采集 / 遥操，再进行独立力矩操作；不会在录制中突然释放':'点击才操作；释放力矩另行确认支撑，不会在打开页面时自动连接';
   }
   $('hardware-mode').textContent=offline?'启用设备操作':'锁定硬件（离线）';
   $('hardware-mode').disabled=resources||runtimeMismatch||state.identity?.source_changed;
@@ -228,17 +248,35 @@ async function startJob(kind,options={}){
   if(requestBusy)return;requestBusy=true;updateControls();
   const epoch=operationEpoch;
   try{
+    if(kind==='teleop'&&state.active){
+      if(!canPrepareTeleoperation())throw Error('先停止当前任务，再准备主从跟随');
+      await command('stop_device');
+      const deadline=Date.now()+12000;
+      do{
+        await new Promise(resolve=>setTimeout(resolve,150));await poll();
+        if(epoch!==operationEpoch)throw Error('准备已取消，未启动主从跟随');
+        if(Date.now()>deadline)throw Error('从臂会话尚未释放，未启动主从跟随');
+      }while(state.active);
+    }
     if(state.preview_active&&!['preview','monitor','control'].includes(kind)){
       await command('stop_preview');
       const deadline=Date.now()+12000;
       do{await new Promise(resolve=>setTimeout(resolve,150));await poll();if(Date.now()>deadline)throw Error('相机尚未释放，未启动新任务');if(epoch!==operationEpoch)throw Error('准备已取消，未启动新任务');}while(state.preview_active);
     }
+    if(epoch!==operationEpoch)throw Error('准备已取消，未启动新任务');
     const job=await api('/api/jobs',{kind,options});if(kind==='record')$('record-root').value=job.dataset_root;await poll();
+    if(epoch!==operationEpoch){
+      if(kind==='preview'&&state.preview_active&&state.preview_job?.id===job.id)await command('stop_preview');
+      else if(state.active&&state.job?.id===job.id)await command('stop');
+    }
   }
   finally{requestBusy=false;updateControls();}
 }
 async function command(name, extra={}) {
-  if(name==='stop')operationEpoch++;
+  if(name==='stop'){
+    operationEpoch++;
+    if(!state?.resources_active){toast('已取消准备，不会继续启动新任务。');return;}
+  }
   const job=name==='stop_preview'?state?.preview_job:state?.active?state.job:name==='stop'?state?.preview_job:null;
   const running=name==='stop_preview'?state?.preview_active:name==='stop'?state?.resources_active:state?.active;
   if(!running||!job)throw new Error('没有运行中的会话');
@@ -254,15 +292,15 @@ $('hardware-mode').addEventListener('click',()=>handle((async()=>{
 })()));
 $('prepare-record').addEventListener('click',()=>handle((async()=>{
   const plan=await captureNaming(),{root,existing}=plan;
-  if(existing&&!await confirmOperation('追加到已有数据集','本次将追加新 episode，已有数据不删除、不覆盖。请核对任务、相机和标定与原数据一致。'))return;
   const episode_tasks=$('record-tasks').value.trim()?$('record-tasks').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean):[];
   await startJob('record',{capture_mode:plan.mode,parent:plan.parent,dataset_root:root,dataset_spec:plan.spec,task:$('record-task').value,episode_tasks,episodes:Number($('record-count').value),record_seconds:Number($('record-duration').value),reset_seconds:Number($('reset-duration').value),group:$('record-group').value,append_confirmed:existing});
 })()));
 $('prepare-teleop').addEventListener('click',()=>handle(startJob('teleop')));
+$('control-teleop').addEventListener('click',()=>handle(startJob('teleop')));
 $('prepare-act').addEventListener('click',()=>handle(startJob('act',{duration:Number($('act-duration').value),reference_start_pose:$('act-reference').value,task:$('act-task').value,group:$('act-group').value})));
 async function quickControl(name){
   const text=name==='release'?'已可靠支撑从臂，关闭力矩后它不会保持姿态。':name==='reset'?'夹爪为空，当前姿态到预设起点的完整路径无障碍；加权复位不具备自动避障能力。':'请先支撑从臂。程序将读取当前位置、写入当前目标再开启保持；收到反馈后再移开支撑。';
-  if(!await confirmOperation({hold:'开启力矩并保持',release:'支撑后释放力矩',reset:'仅复位，不执行模型'}[name],text))return;
+  if(name!=='hold'&&!await confirmOperation({release:'支撑后释放力矩',reset:'仅复位，不执行模型'}[name],text))return;
   if(state.active)await command(name,{confirmed:true});
   else await startJob('control',{initial_command:name,one_shot:true,confirmed:true,reference_start_pose:name==='reset'?$('act-reference').value:state.config.reference_start_pose});
 }
@@ -274,17 +312,18 @@ const starters={'scan-cameras':'camera_scan','monitor-device':'monitor','connect
 Object.entries(starters).forEach(([id,kind])=>$(id).addEventListener('click',()=>handle(startJob(kind))));
 $('preview-cameras').addEventListener('click',()=>handle(state?.preview_active?command('stop_preview'):startJob('preview')));
 $('disconnect-device').addEventListener('click',()=>handle(command('stop_device')));
-$('approve-scene').addEventListener('click',()=>handle((async()=>{if(await confirmOperation('画面检查与启动同步','已核对 Top/Wrist 画面，机械臂夹紧，主臂扶稳，完整运动范围无碰撞物，手和支撑不在从臂路径上。确认后从臂开始低速靠近主臂。'))await command('scene',{confirmed:true});})()));
+$('approve-scene').addEventListener('click',()=>handle(command('scene',{confirmed:true})));
 $('start-session').addEventListener('click',()=>handle((async()=>{
   const kind=state.job.kind;
   const text=kind==='act'?'夹爪为空、娃娃和盒子已摆好，当前姿态到参考起点的完整复位路线及抓放范围无障碍，手和支撑已移开。确认后先按既有方法复位，再运行 ACT。':kind==='replay'?'已检查整条示范路线、机械臂固定，夹爪为空、场景与示范匹配，手和支撑已移开。确认后先低速对齐，再按 observation.state 回放。':'主臂已扶稳，准备进行抓放。确认后有 3 秒倒计时，随后开始本批；后续复位保持遥操。';
-  if(await confirmOperation(kind==='act'?'开始 ACT':kind==='replay'?'开始真机回放':'开始采集 / 遥操',text))await command('start',{confirmed:true});
+  if(['act','replay'].includes(kind)&&!await confirmOperation(kind==='act'?'开始 ACT':'开始真机回放',text))return;
+  await command('start',{confirmed:true});
 })()));
 $('end-episode').addEventListener('click',()=>handle(command('advance',{phase:'RECORDING'})));
 $('end-reset').addEventListener('click',()=>handle(command('advance',{phase:'RESET'})));
-$('hold-position').addEventListener('click',()=>handle((async()=>{if(await confirmOperation('开启当前位置保持','请先可靠支撑从臂。程序将实测位置写为目标后开启力矩，不追逐旧目标；待界面确认后再移开支撑。'))await command('hold',{confirmed:true});})()));
+$('hold-position').addEventListener('click',()=>handle(command('hold',{confirmed:true})));
 $('release-torque').addEventListener('click',()=>handle((async()=>{if(await confirmOperation('释放从臂力矩','从臂已靠在能够承重的支撑上，或由你可靠托住。关闭力矩后不会保持姿态，可能下落。'))await command('release',{confirmed:true});})()));
-for(const [id,delta] of [['jog-minus',-1],['jog-plus',1]])$(id).addEventListener('click',()=>handle((async()=>{const joint=Number($('jog-joint').value);if(await confirmOperation('小步点动',`${jointNames[joint]} 将移动 ${delta} ${joint===5?'个百分点':'度'}。请确认已保持力矩、周围无障碍。`))await command('jog',{confirmed:true,joint,delta});})()));
+for(const [id,delta] of [['jog-minus',-1],['jog-plus',1]])$(id).addEventListener('click',()=>handle(command('jog',{confirmed:true,joint:Number($('jog-joint').value),delta})));
 $('reference-reset').addEventListener('click',()=>handle((async()=>{if(await confirmOperation('复位到参考起点','夹爪为空，当前到参考起点的完整路径无障碍。加权复位不等于自动避障，结束后保持力矩。'))await command('reset',{confirmed:true});})()));
 for(const [id,success] of [['act-success',true],['act-failure',false]])$(id).addEventListener('click',()=>handle(api('/api/result',{success}).then(()=>{toast('已保存人工判断，不自动分析录像。');return refreshFeedback();})));
 
@@ -520,7 +559,7 @@ splitter.addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRi
 $('reset-layout').addEventListener('click',()=>{document.documentElement.style.removeProperty('--inspector-width');$('camera-grid').classList.remove('focused');document.querySelectorAll('.camera-panel').forEach(p=>p.classList.remove('focused'));$('camera-grid').append(document.querySelector('[data-camera="top"]'),document.querySelector('[data-camera="wrist"]'));try{localStorage.removeItem('so101-layout');}catch{}toast('已恢复默认布局。');});
 try{const saved=JSON.parse(localStorage.getItem('so101-layout'));if(saved?.width&&/^\d+(\.\d+)?px$/.test(saved.width))document.documentElement.style.setProperty('--inspector-width',saved.width);for(const name of saved?.order||[]){const p=document.querySelector('.camera-panel[data-camera="'+(name==='top'?'top':'wrist')+'"]');if(p)$('camera-grid').append(p);}}catch{}
 document.addEventListener('keydown',e=>{
-  if(e.key==='Escape'&&state?.resources_active){e.preventDefault();if($('confirm-dialog').open)$('confirm-dialog').close('cancel');handle(command('stop'));return;}
+  if(e.key==='Escape'&&(state?.resources_active||requestBusy)){e.preventDefault();if($('confirm-dialog').open)$('confirm-dialog').close('cancel');handle(command('stop'));return;}
   if(e.repeat||e.ctrlKey||e.metaKey||e.altKey||$('confirm-dialog').open)return;
   if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName)||e.target.isContentEditable)return;
   if(e.code==='Space'&&state?.active&&['RECORDING','RESET'].includes(state.job.phase)){e.preventDefault();handle(command('advance',{phase:state.job.phase}));}

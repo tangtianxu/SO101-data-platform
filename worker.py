@@ -72,9 +72,9 @@ def command_lines(stop):
             yield line.decode("utf-8")
 
 
-def event(kind, **values):
+def event(event_type, **values):
     with PRINT_LOCK:
-        print("SO101_EVENT " + json.dumps({"type": kind, **values}, ensure_ascii=False, allow_nan=False), flush=True)
+        print("SO101_EVENT " + json.dumps({"type": event_type, **values}, ensure_ascii=False, allow_nan=False), flush=True)
 
 
 class Bridge:

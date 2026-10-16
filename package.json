@@ -1,0 +1,6 @@
+{
+  "name": "so101-platform-ui-tests",
+  "private": true,
+  "scripts": {"test": "node --test tests/ui_controls.cjs"},
+  "devDependencies": {"jsdom": "26.1.0"}
+}

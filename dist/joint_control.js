@@ -5,20 +5,32 @@ function installJointControls(){
   panel.innerHTML=`<header class="panel-header"><div><h2>关节目标控制</h2><span class="field-help">勾选关节，填写目标与速度，点击执行后才运动。</span></div><span id="joint-target-status" class="badge neutral">未连接设备</span></header><div class="target-toolbar"><button id="joint-select-all" class="button subtle">全选</button><button id="joint-select-none" class="button subtle">清空选择</button><button id="joint-fill-current" class="button">填入选中关节的当前读数</button><span id="joint-selected-count" class="muted">已选 0 个关节</span></div><div class="table-scroll"><table class="joint-target-table"><thead><tr><th>执行</th><th>关节</th><th>实测位置</th><th>目标位置</th><th>目标速度</th><th>标定范围</th></tr></thead><tbody id="joint-target-rows"></tbody></table></div><div class="target-actions"><button id="joint-execute" class="button primary hardware" disabled>执行选中关节</button><button id="joint-stop" class="button danger-text" disabled>停止 · Esc</button><span id="joint-execution-note" class="field-help">离线可编辑，不会连接或移动机械臂。</span></div><p class="panel-foot">前五关节为 °、°/秒；夹爪为 %、百分点/秒。速度是目标插值速率，不是 FD 原始寄存器值。未勾选关节保持执行开始时的位置；路径不具备自动避障能力。</p>`;
   document.querySelector('.workspace-main').prepend(panel);
   panel.querySelector('thead th:last-child').textContent='软件限位';
+  panel.querySelector('.field-help').textContent='勾选关节，拖动滑条或输入数值；点击执行后才运动。拖动不会实时下发。';
   jointNames.forEach((label,index)=>{
     const row=document.createElement('tr');row.innerHTML=`<td><input id="target-check-${index}" type="checkbox" aria-label="执行${label}"></td><td class="joint-color-${index}">${label}</td><td id="target-measured-${index}">—</td><td><div class="target-input"><input id="target-position-${index}" type="number" step="0.01" placeholder="输入目标" aria-label="${label}目标位置"><span>${index===5?'%':'°'}</span></div></td><td><div class="target-input"><input id="target-speed-${index}" type="number" step="0.1" min="0.1" aria-label="${label}目标速度"><span>${index===5?'百分点/s':'°/s'}</span></div></td><td id="target-limits-${index}" class="muted">读取配置中</td>`;
     $('joint-target-rows').append(row);
-    row.querySelectorAll('input').forEach(input=>input.addEventListener('input',()=>updateJointControls()));
+    for(const field of ['position','speed']){
+      const number=$('target-'+field+'-'+index),cell=number.closest('td');
+      cell.classList.add('target-editor-cell');
+      const slider=document.createElement('input');slider.type='range';slider.id='target-'+field+'-slider-'+index;
+      slider.className='target-slider';slider.step=field==='position'?'0.1':'0.1';slider.disabled=true;
+      slider.setAttribute('aria-label',label+(field==='position'?'目标位置滑条':'目标速度滑条'));
+      slider.title='只编辑目标；点击执行后才运动';cell.append(slider);
+      slider.addEventListener('input',()=>{
+        number.value=slider.value;$('target-check-'+index).checked=true;syncTargetSlider(index,field);updateJointControls();
+      });
+      number.addEventListener('input',()=>syncTargetSlider(index,field));
+    }
+    row.querySelectorAll('input:not([type=range])').forEach(input=>input.addEventListener('input',()=>updateJointControls()));
   });
   for(const [id,checked] of [['joint-select-all',true],['joint-select-none',false]])$(id).addEventListener('click',()=>{jointKeys.forEach((_,i)=>{$('target-check-'+i).checked=checked;});updateJointControls();});
   $('joint-fill-current').addEventListener('click',()=>{
     if(!state?.active||state.job.kind!=='control'||!Array.isArray(state.telemetry?.state))return;
-    jointKeys.forEach((_,i)=>{if($('target-check-'+i).checked)$('target-position-'+i).value=Number(state.telemetry.state[i]).toFixed(2);});updateJointControls();
+    jointKeys.forEach((_,i)=>{if($('target-check-'+i).checked){$('target-position-'+i).value=Number(state.telemetry.state[i]).toFixed(2);syncTargetSlider(i,'position');}});updateJointControls();
   });
   $('joint-execute').addEventListener('click',()=>handle((async()=>{
     const payload=jointTargetPlan();
-    const text=Object.entries(payload.joints).map(([name,p])=>{const i=jointKeys.indexOf(name);return `${jointNames[i]} → ${p.target}${i===5?'%':'°'}，${p.speed}${i===5?'百分点/秒':'°/秒'}`;}).join('\n');
-    if(await confirmOperation('执行选中关节目标',text+'\n\n未选关节保持执行开始时的位置。已核对完整路径，执行过程中不触碰机械臂；停止后保持，不自动释放力矩。'))await command('joint_target',{...payload,confirmed:true});
+    await command('joint_target',{...payload,confirmed:true});
   })()));
   $('joint-stop').addEventListener('click',()=>handle(command('stop')));
   const version=document.querySelector('.sidebar-bottom .version');version.id='runtime-version';version.title='点击查看版本、实例与正式入口';version.tabIndex=0;
@@ -29,10 +41,26 @@ function installJointControls(){
   installSoftwareLimits();
   // Loaded after a follower calibration is explicitly configured, not on first-run boot.
 }
+function syncTargetSlider(index,field){
+  const number=$('target-'+field+'-'+index),slider=$('target-'+field+'-slider-'+index);
+  if(!slider||slider.disabled)return;
+  // Never round/clamp the numeric draft: an invalid typed target must stay visible and fail validation.
+  const draft=number.value.trim(),value=draft===''?NaN:Number(draft);
+  const fallback=field==='position'?state?.telemetry?.state?.[index]:undefined;
+  if(Number.isFinite(value))slider.value=String(value);
+  else if(Number.isFinite(fallback))slider.value=String(fallback);
+  slider.setAttribute('aria-valuetext',draft===''?'尚未设置目标':draft+(index===5?(field==='position'?' %':' 百分点/秒'):(field==='position'?' °':' °/秒')));
+}
 function applyJointProfile(value){
     jointControlProfile=value;value.joints.forEach((joint,i)=>{
       $('target-position-'+i).min=String(Math.ceil(joint.min*100)/100);$('target-position-'+i).max=String(Math.floor(joint.max*100)/100);
       $('target-speed-'+i).max=joint.speed_max;$('target-speed-'+i).value=joint.default_speed;
+      for(const field of ['position','speed']){
+        const slider=$('target-'+field+'-slider-'+i);
+        slider.min=field==='position'?$('target-position-'+i).min:joint.speed_min;
+        slider.max=field==='position'?$('target-position-'+i).max:joint.speed_max;
+        slider.disabled=false;syncTargetSlider(i,field);
+      }
       $('target-limits-'+i).textContent=`${joint.min.toFixed(2)} ～ ${joint.max.toFixed(2)} ${joint.unit}`;
       $('software-baseline-'+i).textContent=`${joint.calibrated_min.toFixed(2)} ～ ${joint.calibrated_max.toFixed(2)} ${joint.unit}`;
       for(const side of ['min','max'])setLimitInput($('software-'+side+'-'+i),joint[side]);
@@ -56,7 +84,7 @@ function updateJointControls(){
   const count=jointKeys.filter((_,i)=>$('target-check-'+i).checked).length;
   const control=!!(state?.active&&state.job?.kind==='control'&&state.job.phase==='CONTROL');
   const health=normalizeHealth(state?.telemetry),holding=jointKeys.every(n=>health.torque[n]===1);
-  const blocked=!state||state.offline||runtimeMismatch||state.identity?.source_changed;
+  const blocked=!state||state.offline||runtimeMismatch||state.identity?.source_changed||state.restart_required;
   let invalid='';if(count&&jointControlProfile){try{jointTargetPlan();}catch(error){invalid=error.message;}}
   $('joint-selected-count').textContent='已选 '+count+' 个关节';
   $('joint-execute').disabled=!!(blocked||!control||!holding||!count||!jointControlProfile||invalid||requestBusy||state?.job?.target_pending);

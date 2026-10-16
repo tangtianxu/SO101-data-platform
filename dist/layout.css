@@ -85,6 +85,12 @@
 .joint-target-table input[type=checkbox] { width:16px;height:16px;accent-color:#168576; }
 .target-input { display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:11px; }
 .target-input input { width:100px;min-width:80px;font-variant-numeric:tabular-nums; }
+.target-editor-cell { min-width:165px; }
+.target-editor-cell .target-input input { width:92px; }
+.joint-target-table .target-slider { display:block;width:100%;min-width:125px;height:24px;margin:7px 0 0;padding:0;border:0;box-shadow:none;background:transparent;accent-color:#168576;cursor:ew-resize;touch-action:pan-y; }
+.joint-target-table .target-slider:disabled { cursor:not-allowed;opacity:.4; }
+.joint-target-table .target-slider:focus-visible { outline:2px solid #168576;outline-offset:3px;border-radius:4px; }
+.joint-target-table tr:has(input[type=checkbox]:checked) { background:#f3faf8; }
 .runtime-details { display:grid;gap:10px;font-size:12px; }
 .runtime-details>div { display:grid;grid-template-columns:130px minmax(0,1fr);gap:12px; }
 .runtime-details code { overflow-wrap:anywhere; }

@@ -36,3 +36,4 @@ calibration/
 *.key
 .DS_Store
 Thumbs.db
+node_modules/

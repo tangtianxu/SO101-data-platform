@@ -59,7 +59,7 @@ function acceptPortableConfig(saved){
 function applyPortableState(){
   if(!state)return;
   const caps=state.capabilities||{};
-  const modes={'preview-cameras':'preview','monitor-device':'monitor','connect-control':'control','prepare-record':'record','prepare-teleop':'teleop','prepare-act':'act','prepare-replay':'replay','act-reset-only':'control'};
+  const modes={'preview-cameras':'preview','monitor-device':'monitor','connect-control':'control','prepare-record':'record','prepare-teleop':'teleop','control-teleop':'teleop','prepare-act':'act','prepare-replay':'replay','act-reset-only':'control'};
   Object.entries(modes).forEach(([id,kind])=>{if(caps[kind]&&!caps[kind].ready&&!(id==='preview-cameras'&&state.preview_active)){$(id).disabled=true;$(id).title=caps[kind].reason+'；请到配置页完成设置';}});
   if(!caps.control?.ready)for(const id of ['quick-hold','quick-release'])$(id).disabled=true;
   $('configuration-readiness').replaceChildren(...Object.entries(caps).map(([kind,item])=>{const p=document.createElement('p');p.textContent=`${kind}：${item.ready?'配置检查通过（不代表设备已验收）':item.reason}`;return p;}));
