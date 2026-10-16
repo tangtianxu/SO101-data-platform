@@ -407,6 +407,30 @@ test('batch episode checkboxes select all or filtered rows without opening video
   assert.equal(f.$('confirm-dialog').open,false);
 });
 
+test('episode list has a visible select-all checkbox, mixed state and clear action that never opens videos',async t=>{
+  const f=await batchFixture(t),master=f.$('episode-select-all');
+  assert.equal(master.disabled,false);assert.equal(master.checked,false);assert.equal(master.indeterminate,false);
+  assert.equal(f.$('episode-selection-toolbar').nextElementSibling.id,'episode-list');
+  master.click();assert.equal(f.run('episodeSelection.size'),3);assert.equal(master.checked,true);assert.equal(master.indeterminate,false);
+  assert.equal(f.$('episode-list').querySelectorAll('input:checked').length,3);assert.match(f.$('episode-selected-count').textContent,/3 \/ 3/);
+  f.$('episode-list').querySelector('input').click();assert.equal(master.checked,false);assert.equal(master.indeterminate,true);
+  master.click();assert.equal(f.run('episodeSelection.size'),3);master.click();assert.equal(f.run('episodeSelection.size'),0);
+  f.$('batch-select-all').click();assert.equal(master.checked,true);f.$('episode-clear-selection').click();assert.equal(master.checked,false);
+  assert.equal(f.$('episode-clear-selection').disabled,true);assert.equal(f.calls.length,0);
+});
+
+test('list select-all clearly scopes to search results, preserves hidden selections and disables for zero results or a loading dataset',async t=>{
+  const f=await batchFixture(t),master=f.$('episode-select-all');
+  f.$('episode-list').querySelector('input').click();f.input('episode-search','2');
+  assert.equal(f.$('episode-select-all-label').textContent,'全选筛选结果');master.click();
+  assert.deepEqual(Array.from(f.run('[...episodeSelection].sort()')),[0,1]);
+  master.click();assert.deepEqual(Array.from(f.run('[...episodeSelection]')),[0]);
+  f.input('episode-search','不存在');assert.equal(master.disabled,true);assert.equal(master.checked,false);
+  f.input('episode-search','');assert.equal(master.indeterminate,true);
+  f.run('resetEpisodeSelection("QA/next");updateDatasetBatchControls();');assert.equal(master.disabled,true);assert.equal(master.indeterminate,false);
+  assert.equal(f.calls.length,0);
+});
+
 test('batch mark posts once without a confirmation dialog and preserves notes',async t=>{
   const f=await batchFixture(t),fetch=f.w.fetch;
   f.w.fetch=async(url,opts={})=>{

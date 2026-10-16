@@ -17,6 +17,15 @@ function updateDatasetBatchControls(){
   const matched=!!library&&episodeSelectionRoot===library.root&&$('dataset-select').value===library.root;
   const total=matched?(library?.episodes?.length||0):0,blocked=!matched||batchReviewBusy||!!(state?.active&&state.job?.kind==='crop'),resources=!!state?.resources_active||requestBusy;
   $('batch-selection-count').textContent=`勾选 ${episodeSelection.size} / ${total} 条`;
+  const visible=matched?filteredEpisodes():[],visibleSelected=visible.filter(e=>episodeSelection.has(e.index)).length;
+  const master=$('episode-select-all');
+  master.checked=visible.length>0&&visibleSelected===visible.length;
+  master.indeterminate=visibleSelected>0&&visibleSelected<visible.length;
+  master.disabled=blocked||!visible.length;
+  $('episode-select-all-label').textContent=$('episode-search').value.trim()?'全选筛选结果':'全选';
+  $('episode-selected-count').textContent='已选 '+episodeSelection.size+' / '+total+' 条';
+  $('episode-clear-selection').disabled=blocked||!episodeSelection.size;
+  $('batch-select-all').textContent='全选本数据集';
   $('batch-select-all').disabled=!total||blocked;$('batch-select-filtered').disabled=!total||blocked;$('batch-clear').disabled=!episodeSelection.size||blocked;
   document.querySelectorAll('[data-batch-result],[data-batch-episode]').forEach(el=>el.disabled=blocked||(!el.hasAttribute('data-batch-episode')&&!episodeSelection.size));
   $('batch-auto-trim').disabled=!matched||!total||resources||batchReviewBusy||!!library?.crop_collection||!!datasetItems.find(d=>d.root===library?.root)?.is_feedback;
@@ -90,6 +99,14 @@ async function observeMotionJob(previous,next){
   }finally{motionPreviewLoading=false;}
 }
 function installDatasetBatch(){
+  const selection=document.createElement('div');selection.id='episode-selection-toolbar';selection.className='episode-selection-toolbar';
+  selection.innerHTML='<label><input id="episode-select-all" type="checkbox" aria-label="全选当前轨迹列表"><span id="episode-select-all-label">全选</span></label><span id="episode-selected-count" class="muted" aria-live="polite">已选 0 / 0 条</span><button id="episode-clear-selection" class="button" type="button" disabled>清空</button>';
+  $('episode-list').before(selection);
+  $('episode-select-all').addEventListener('change',()=>{
+    for(const ep of filteredEpisodes())$('episode-select-all').checked?episodeSelection.add(ep.index):episodeSelection.delete(ep.index);
+    renderEpisodeList();
+  });
+  $('episode-clear-selection').addEventListener('click',()=>{episodeSelection.clear();renderEpisodeList();});
   const panel=$('dataset-batch-tools');panel.className='panel dataset-batch-tools';
   panel.innerHTML='<div class="batch-tool-row"><h2>批量处理</h2><span id="batch-selection-count" class="muted">勾选 0 / 0 条</span><button id="batch-select-all" type="button" class="button subtle">勾选全部</button><button id="batch-select-filtered" type="button" class="button subtle">勾选筛选结果</button><button id="batch-clear" type="button" class="button subtle">清空</button></div><div class="batch-tool-row"><span class="field-help">对勾选轨迹标记：</span><button type="button" class="button" data-batch-result="success">成功</button><button type="button" class="button" data-batch-result="failure">失败</button><button type="button" class="button danger-text" data-batch-result="exclude">不用于训练</button><button type="button" class="button subtle" data-batch-result="unreviewed">待审核</button><button id="batch-auto-trim" type="button" class="button primary">自动裁剪成功轨迹</button></div>';
   const dialog=document.createElement('dialog');dialog.id='motion-trim-dialog';dialog.className='dataset-dialog';dialog.setAttribute('aria-labelledby','motion-trim-title');
