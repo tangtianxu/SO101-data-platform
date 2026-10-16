@@ -544,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not (root / "meta/info.json").is_file() or not file.is_relative_to(root) or file.suffix.lower() != ".mp4":
                     raise PermissionError("只允许读取所选数据集的视频")
                 return self.media(file)
-            assets = {"/": "index.html", "/app.js": "app.js", "/capture_groups.js":"capture_groups.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
+            assets = {"/": "index.html", "/app.js": "app.js", "/dataset_browser.js":"dataset_browser.js", "/capture_groups.js":"capture_groups.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
             if url.path not in assets:
                 return self.json({"error": "未找到"}, 404)
             file = HERE / "dist" / assets[url.path]

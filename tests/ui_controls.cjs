@@ -41,7 +41,7 @@ async function fixture(t){
     }
     return {ok:true,json:async()=>value};
   };
-  for(const name of ['naming.js','history.js','joint_control.js','portable.js','capture_groups.js','app.js']){
+  for(const name of ['dataset_browser.js','naming.js','history.js','joint_control.js','portable.js','capture_groups.js','app.js']){
     const file=path.join(root,'dist',name);if(!fs.existsSync(file))continue;
     let code=fs.readFileSync(file,'utf8');
     // Suppress only the polling boot line; test the actual installed handlers and all control functions.
@@ -156,7 +156,7 @@ function dataset(name,stage,review,time,extra={}){
   return {name,root:'QA/'+name,ready:true,episodes:3,sort_time:time,naming:{spec,simple_spec:spec,display_name:name,append_allowed:stage==='raw'},...extra};
 }
 function loadItems(f,items){f.w.__items=structuredClone(items);f.run('datasetItems=sortDatasetItems(window.__items);renderDatasetChoices();');}
-function roots(f){return Array.from(f.$('dataset-select').options,o=>o.value).filter(Boolean);}
+function roots(f){return Array.from(f.$('dataset-browser-list').querySelectorAll('[data-dataset-root]'),o=>o.dataset.datasetRoot);}
 function category(f,key){f.w.document.querySelector('[data-dataset-category="'+key+'"]').click();}
 
 test('dataset picker separates raw, approved training and processed/other without changing labels',async t=>{
@@ -177,7 +177,7 @@ test('dataset search matches task, description, notes and physical name',async t
   const f=await fixture(t),item=dataset('CustomName','raw','pending',1);item.naming.simple_spec.note='变化娃娃位置';
   loadItems(f,[item]);
   for(const query of ['customname','娃娃','变化娃娃位置']){f.input('dataset-search',query);assert.deepEqual(roots(f),['QA/CustomName']);}
-  f.input('dataset-search','no-match');assert.deepEqual(roots(f),[]);assert.equal(f.$('dataset-select').options[0].text,'没有匹配的数据集');
+  f.input('dataset-search','no-match');assert.deepEqual(roots(f),[]);assert.match(f.$('dataset-browser-list').textContent,/没有匹配/);
   f.input('dataset-search','');assert.equal(roots(f).length,1);assert.equal(f.posted().length,0);
 });
 test('crop/source navigation reveals the destination category and clears blocking search',async t=>{
@@ -194,10 +194,13 @@ test('refresh keeps selected dataset after reclassification and new count/order 
   await f.run('refreshDatasets()');assert.equal(f.run('datasetCategory'),'train');assert.equal(f.$('dataset-select').value,'QA/reviewed');
   assert.deepEqual(roots(f),['QA/new-training','QA/reviewed']);assert.match(f.w.document.querySelector('[data-dataset-category="train"]').textContent,/2/);
 });
-test('clearing a filtered-out selection clears stale review and archive state',async t=>{
+test('browsing filters and closing picker preserves the open dataset and its review',async t=>{
   const f=await fixture(t);loadItems(f,[dataset('raw','raw','pending',1),dataset('train','processed','train',2)]);
   f.run('revealDatasetChoice("QA/raw");library={root:"QA/raw",episodes:[]};');category(f,'train');await pause(0);
-  assert.equal(f.$('dataset-select').value,'');assert.equal(f.run('library'),null);assert.equal(f.$('archive-dataset').disabled,true);
+  assert.equal(f.$('dataset-select').value,'QA/raw');assert.equal(f.run('library.root'),'QA/raw');
+  f.$('dataset-picker-open').click();assert.equal(f.$('dataset-browser-dialog').open,true);
+  f.$('dataset-browser-dialog').querySelector('[data-close-dataset-dialog]').click();assert.equal(f.$('dataset-browser-dialog').open,false);
+  assert.equal(f.$('dataset-select').value,'QA/raw');assert.equal(f.posted().length,0);
 });
 
 async function initializeNaming(f){
@@ -235,6 +238,67 @@ test('dataset management defaults to labels and archive tab remains functional',
   assert.equal(f.$('manager-label').classList.contains('hidden'),false);
   assert.equal(f.$('manager-archive').classList.contains('hidden'),true);
   assert.ok(f.$('save-dataset-label'));assert.ok(f.$('export-crop'));assert.ok(f.$('archive-dataset'));
+});
+
+test('wide dataset browser renders complete long names safely and exposes editing beside selection',async t=>{
+  const f=await fixture(t),item=dataset('long-name','raw','pending',1);
+  item.naming.simple_spec.description='娃娃和目标位置变化'.repeat(12)+'<img src=x onerror=alert(1)>';
+  loadItems(f,[item]);f.$('dataset-picker-open').click();
+  assert.equal(f.$('dataset-browser-dialog').open,true);
+  assert.ok(f.$('dataset-browser-list').textContent.includes(item.naming.simple_spec.description));
+  assert.equal(f.$('dataset-browser-list').querySelector('img'),null);
+  assert.equal(f.$('dataset-edit-info').closest('.dataset-current-panel')!==null,true);
+  assert.equal(f.$('dataset-select').closest('label').hidden,true);
+  assert.equal(f.posted().length,0);
+});
+
+async function datasetInformationFixture(t){
+  const f=await fixture(t);await initializeNaming(f);
+  const item=dataset('original-folder','raw','pending',1);item.naming.dataset_id='stable-dataset-id';
+  const fetch=f.w.fetch;
+  f.w.fetch=async(url,opts={})=>{
+    if(url==='/api/dataset-name'){const body=JSON.parse(opts.body);return {ok:true,json:async()=>({spec:body.spec,name:'display-name',root:'QA/display-name'})};}
+    if(url==='/api/dataset-management'){
+      const body=JSON.parse(opts.body);f.calls.push({url,body});
+      item.naming={...item.naming,spec:body.spec,simple_spec:body.spec,display_name:'把娃娃放进盒子 · '+body.spec.description};
+      return {ok:true,json:async()=>({root:item.root,naming:item.naming,data_modified:false,physical_folder_renamed:false})};
+    }
+    if(url==='/api/datasets')return {ok:true,json:async()=>[item]};
+    if(url==='/api/capture-collections'||url==='/api/archives')return {ok:true,json:async()=>[]};
+    return fetch(url,opts);
+  };
+  f.snapshot.active=false;f.snapshot.resources_active=false;f.render();loadItems(f,[item]);
+  f.run('revealDatasetChoice("QA/original-folder");library={root:"QA/original-folder",episodes:[]};selectedEpisode={index:4};renderDatasetNaming(datasetItems[0]);');
+  f.calls.length=0;return {...f,item};
+}
+
+test('visible information button opens a full editor with read-only identity and editable scene',async t=>{
+  const f=await datasetInformationFixture(t);f.$('dataset-edit-info').click();await until(()=>f.$('dataset-info-dialog').open);
+  assert.match(f.$('dataset-info-identity').textContent,/stable-dataset-id/);
+  assert.match(f.$('dataset-info-identity').textContent,/QA\/original-folder/);
+  for(const key of ['domain','stage','review','instruction','description','note'])assert.ok(f.run('editNameForm.get("'+key+'")'));
+  assert.equal(f.run('editNameForm.get("description").readOnly'),false);
+  assert.equal(f.calls.some(c=>c.url==='/api/jobs'),false);
+});
+
+test('scene save updates selected name without a redundant modal, episode reload or identity change',async t=>{
+  const f=await datasetInformationFixture(t);await f.run('openDatasetInformation()');
+  f.run('editNameForm.get("description").value="位置变化";editNameForm.get("note").value="娃娃位置有变化";');
+  f.$('save-dataset-label').click();await until(()=>f.$('toast').textContent.includes('名称与资料已保存'));
+  const mutations=f.posted().filter(c=>c.url==='/api/dataset-management');
+  assert.equal(mutations.length,1);assert.equal(mutations[0].body.root,'QA/original-folder');
+  assert.equal(mutations[0].body.spec.description,'位置变化');assert.equal(mutations[0].body.spec.review,'pending');
+  assert.equal(f.$('confirm-dialog').open,false);assert.equal(f.$('dataset-select').value,'QA/original-folder');
+  assert.match(f.$('dataset-current-title').textContent,/位置变化/);
+  assert.equal(f.run('library.naming.dataset_id'),'stable-dataset-id');assert.equal(f.run('selectedEpisode.index'),4);
+  assert.equal(f.calls.some(c=>c.url.startsWith('/api/dataset?')||c.url==='/api/jobs'),false);
+});
+
+test('new training approval still needs confirmation and cancellation saves nothing',async t=>{
+  const f=await datasetInformationFixture(t);await f.run('openDatasetInformation()');
+  f.run('editNameForm.get("review").value="train";');f.$('save-dataset-label').click();
+  await until(()=>f.$('confirm-dialog').open);f.$('confirm-dialog').close('cancel');await pause(0);
+  assert.equal(f.posted().some(c=>c.url==='/api/dataset-management'),false);
 });
 
 function addGroup(f,task,count){

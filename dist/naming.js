@@ -1,6 +1,6 @@
 'use strict';
 let datasetNamingOptions=null,datasetNamingReady=null,recordNameForm=null,editNameForm=null,cropNameForm=null;
-let editNameRoot=null;
+let editNameRoot=null,datasetInfoSaving=false;
 
 class DatasetNameForm {
   constructor(container,prefix,{capture=false,crop=false,record=false,onPath=null}={}){
@@ -17,6 +17,7 @@ class DatasetNameForm {
   }
   get(key){return this.element.querySelector('[data-name="'+key+'"]');}
   set(spec){
+    this.ticket++;clearTimeout(this.timer);
     this.base={...datasetNamingOptions.simple_defaults,...spec,schema_version:2};
     for(const key of ['domain','stage','review','instruction','description','note'])this.get(key).value=this.base[key];
     this.get('parent').value=state.config.dataset_home;this.result=null;
@@ -59,27 +60,28 @@ function sortDatasetItems(items){
 function datasetMatchesSearch(item){
   const query=$('dataset-search')?.value.trim().toLocaleLowerCase()||'';
   const s=item.naming?.simple_spec||{};
-  return !query||[item.name,item.naming?.display_name,s.instruction,s.description,s.note,item.capture_group?.collection_name].join(' ').toLocaleLowerCase().includes(query);
+  return !query||[item.name,item.root,item.naming?.dataset_id,item.naming?.display_name,s.instruction,s.description,s.note,item.capture_group?.collection_name].join(' ').toLocaleLowerCase().includes(query);
 }
 function visibleDatasets(){
   return sortDatasetItems(datasetItems).filter(item=>(datasetCategory==='all'||datasetCategoryOf(item)===datasetCategory)&&datasetMatchesSearch(item));
 }
 function renderDatasetChoices(preferred=$('dataset-select').value){
   const select=$('dataset-select'),items=visibleDatasets();
-  select.replaceChildren(new Option(items.length?'请选择数据集':$('dataset-search')?.value.trim()?'没有匹配的数据集':'此分类暂无数据集',''));
+  select.replaceChildren(new Option('请选择数据集',''));
   const collections=new Map();
-  for(const item of items){
+  for(const item of sortDatasetItems(datasetItems)){
     let parent=select;const context=item.capture_group;
     if(context){if(!collections.has(context.collection_root)){const group=document.createElement('optgroup');group.label='分组采集 · '+context.collection_name;collections.set(context.collection_root,group);select.append(group);}parent=collections.get(context.collection_root);}
     const option=new Option((context?context.id+' · ':'')+datasetOptionLabel(item)+(item.protected?' · 保留':''),item.root);
     option.title=(item.naming?.display_name||item.name)+'\n'+(item.started_at||'未记录采集时间，按目录创建时间排序')+'\n'+item.root;parent.append(option);
   }
-  if(items.some(item=>item.root===preferred))select.value=preferred;
+  if(datasetItems.some(item=>item.root===preferred))select.value=preferred;
   document.querySelectorAll('[data-dataset-category]').forEach(button=>{
     const key=button.dataset.datasetCategory,count=datasetItems.filter(item=>key==='all'||datasetCategoryOf(item)===key).length;
     button.textContent=datasetCategories[key]+' '+count;button.setAttribute('aria-pressed',String(key===datasetCategory));
   });
   if($('dataset-filter-summary'))$('dataset-filter-summary').textContent=`${items.length} 份 · 时间倒序（新 → 旧）`;
+  renderDatasetBrowser();
   try{localStorage.setItem('so101-dataset-category',datasetCategory);}catch{}
 }
 function revealDatasetChoice(root){
@@ -89,17 +91,17 @@ function revealDatasetChoice(root){
   renderDatasetChoices(root);return true;
 }
 function installDatasetPicker(){
+  installDatasetBrowser();
   try{const saved=localStorage.getItem('so101-dataset-category');if(Object.hasOwn(datasetCategories,saved))datasetCategory=saved;}catch{}
   const picker=document.createElement('div');picker.className='dataset-picker-filters';
   picker.innerHTML='<div id="dataset-category-buttons" class="dataset-category-buttons" role="group" aria-label="数据集分类"></div><input id="dataset-search" type="search" placeholder="搜索任务、备注或名称" aria-label="搜索数据集"><p id="dataset-filter-summary" class="field-help"></p><p class="field-help dataset-category-help">可训练：已保存且人工标为可训练。原始：其余未排除的 raw；处理待审、排除和未分类在「处理 / 其他」。分类不改动文件。</p>';
-  $('dataset-select').closest('label').before(picker);
+  $('dataset-browser-filters').append(picker);
   for(const [key,label] of Object.entries(datasetCategories)){
     const button=document.createElement('button');button.type='button';button.className='button subtle';button.dataset.datasetCategory=key;button.textContent=label;
     button.addEventListener('click',()=>{datasetCategory=key;filterChanged();});$('dataset-category-buttons').append(button);
   }
   function filterChanged(){
-    const previous=$('dataset-select').value;renderDatasetChoices();
-    if(previous&&!$('dataset-select').value)handle(openDataset(''));
+    renderDatasetChoices(); // Browsing/cancelling must not close the current dataset.
     updateControls();
   }
   $('dataset-search').addEventListener('input',filterChanged);renderDatasetChoices();
@@ -116,20 +118,29 @@ async function ensureDatasetNaming(){
     })()));
     setInterval(()=>{if(!state?.active&&$('record-target-mode').value==='new')recordNameForm.update();},30000);
     const oldArchive=$('dataset-archive-panel');
-    const manager=document.createElement('details');manager.className='panel library-management';
-    manager.innerHTML='<summary>数据集管理：名称与备注／恢复归档</summary><div class="library-tabs"><button class="button selected" data-manager-tab="label">名称、分类与备注</button><button class="button" data-manager-tab="archive">恢复归档</button></div><div id="manager-label"><div id="edit-name-form"></div><button id="save-dataset-label" class="button primary">保存名称与分类（不移动文件夹）</button><p class="field-help">可训练是人工审核标签，不自动改变训练条目。新建及补录统一在采集工作台进行。</p></div><div id="manager-archive" class="hidden"></div>';
-    oldArchive.before(manager);$('manager-archive').append(oldArchive);oldArchive.open=true;oldArchive.querySelector('summary').hidden=true;
+    const manager=document.createElement('section');manager.className='library-management';
+    manager.innerHTML='<div class="library-tabs"><button class="button selected" data-manager-tab="label">名称、分类与备注</button><button class="button" data-manager-tab="archive">恢复归档</button></div><div id="manager-label"><div id="edit-name-form"></div><button id="save-dataset-label" class="button primary">保存名称与资料</button><p class="field-help">此处语言指令仅用于平台显示，不改写已经录入的 task；小组指令身份固定。可训练是人工审核标签，不自动改变训练条目。</p></div><div id="manager-archive" class="hidden"></div>';
+    $('dataset-info-body').append(manager);$('manager-archive').append(oldArchive);oldArchive.open=true;oldArchive.querySelector('summary').hidden=true;
     manager.querySelectorAll('[data-manager-tab]').forEach(button=>button.addEventListener('click',()=>{
+      datasetInformationIdentity(button.dataset.managerTab);
       for(const name of ['label','archive'])$('manager-'+name).classList.toggle('hidden',name!==button.dataset.managerTab);
       manager.querySelectorAll('[data-manager-tab]').forEach(b=>b.classList.toggle('selected',b===button));
     }));
     editNameForm=new DatasetNameForm($('edit-name-form'),'edit');
     $('save-dataset-label').addEventListener('click',()=>handle((async()=>{
+      if(datasetInfoSaving)return;
       const root=$('dataset-select').value;if(!root||root!==editNameRoot)throw Error('请先选择数据集');
-      if(!await editNameForm.update())throw Error('请核对命名信息');const spec=editNameForm.spec();
-      if(!await confirmOperation('保存数据集名称与分类','只修改平台显示信息，实际目录、轨迹和语言标签不变。'+(spec.review==='train'?'你确认已人工审核训练条目；成功标签不保证数据质量。':'')))return;
-      await api('/api/dataset-management',{action:'label',root,spec,confirmed:true,review_confirmed:spec.review==='train'});
-      await refreshDatasets();$('dataset-select').value=root;await openDataset(root);toast('名称与备注已保存，原始目录未移动。');
+      datasetInfoSaving=true;updateNamingControls();
+      try{
+        if(!await editNameForm.update())throw Error('请核对命名信息');const spec=editNameForm.spec();
+        if(root!==editNameRoot||root!==$('dataset-select').value)throw Error('所选数据集已变化，请重新打开资料编辑');
+        const previous=datasetItems.find(d=>d.root===root)?.naming?.simple_spec;
+        if(spec.review==='train'&&previous?.review!=='train'&&!await confirmOperation('标为可训练','你确认已人工审核训练条目；成功标签不保证数据质量。只修改审核分类，不改轨迹或训练划分。'))return;
+        await api('/api/dataset-management',{action:'label',root,spec,confirmed:true,review_confirmed:spec.review==='train'});
+        await refreshDatasets();$('dataset-select').value=root;const item=datasetItems.find(d=>d.root===root);
+        if(library?.root===root)library.naming=item?.naming;
+        renderDatasetNaming(item);toast('名称与资料已保存，稳定 ID、原始目录和轨迹未修改。');
+      }finally{datasetInfoSaving=false;updateNamingControls();}
     })()));
     $('crop-output').readOnly=true;$('crop-browse').textContent='查看裁剪集';
     const item=datasetItems.find(d=>d.root===$('dataset-select').value);if(item)fillDatasetNameEditor(item);
@@ -137,7 +148,13 @@ async function ensureDatasetNaming(){
     updateNamingControls();return true;
   })();return datasetNamingReady;
 }
-function updateNamingControls(){if($('save-dataset-label'))$('save-dataset-label').disabled=!!state?.resources_active||!editNameRoot;}
+function updateNamingControls(){
+  if($('save-dataset-label'))$('save-dataset-label').disabled=datasetInfoSaving||!!state?.resources_active||!editNameRoot;
+  if($('dataset-edit-info')){
+    const item=datasetItems.find(d=>d.root===$('dataset-select').value);
+    $('dataset-edit-info').disabled=datasetInfoSaving||!!state?.resources_active||!item||!!item.is_feedback;
+  }
+}
 function fillDatasetNameEditor(item){if(!editNameForm)return;editNameRoot=item?.is_feedback?null:item?.root||null;editNameForm.set(item?.is_feedback?datasetNamingOptions.simple_defaults:item?.naming?.simple_spec||datasetNamingOptions.simple_defaults);editNameForm.get('instruction').readOnly=!!item?.capture_group;if(editNameRoot)editNameForm.update();updateNamingControls();}
 function refreshRecordTargets(){
   const select=$('record-existing'),previous=select.value;select.replaceChildren(new Option('选择补录的原始数据集',''));
@@ -178,5 +195,12 @@ function renderDatasetNaming(item){
   if(s)for(const [field,labels] of [['domain',datasetNamingOptions?.domains],['stage',datasetNamingOptions?.stages],['review',datasetNamingOptions?.reviews]]){
     const tag=document.createElement('span');tag.className='dataset-tag tag-'+field+'-'+s[field];tag.textContent=labels?.[s[field]]||s[field];tags.append(tag);
   }
-  detail.replaceChildren();for(const text of [s?.description,item?.naming?.note,item?'实际目录：'+item.root:'',item?.naming?.canonical_name?'显示名：'+item.naming.canonical_name:'']){if(!text)continue;const p=document.createElement('p');p.textContent=text;detail.append(p);}fillDatasetNameEditor(item);
+  detail.replaceChildren();
+  if(item){
+    if(s?.description||item.naming?.note){const summary=document.createElement('p');summary.textContent=[s?.description,item.naming?.note].filter(Boolean).join(' · ');detail.append(summary);}
+    const files=document.createElement('details'),title=document.createElement('summary');title.textContent='文件位置与稳定 ID（保留，不随改名变化）';files.append(title);
+    for(const text of ['实际目录：'+item.root,'稳定 ID：'+(item.naming?.dataset_id||'尚未登记'),item.naming?.canonical_name?'规范显示名：'+item.naming.canonical_name:'']){if(text){const p=document.createElement('p');p.textContent=text;files.append(p);}}
+    detail.append(files);
+  }
+  renderDatasetIdentity(item);fillDatasetNameEditor(item);
 }
