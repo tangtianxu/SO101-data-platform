@@ -70,7 +70,9 @@ def save_review(root, episode, result, note=''):
         raise ValueError('未知审核标记')
     source, source_episode = review_reference(root, episode)
     notes = read_reviews(source)
-    notes[str(source_episode)] = {'result': result, 'note': str(note)[:1000], 'time': datetime.now().isoformat()}
+    old=notes.get(str(source_episode),{})
+    if old.get('deleted') and result!='exclude':raise ValueError('请先恢复已删除轨迹，再修改审核状态')
+    notes[str(source_episode)] = {**old,'result': result, 'note': str(note)[:1000], 'time': datetime.now().isoformat()}
     atomic_json(annotation_path(source), notes)
     return read_reviews(root)
 
@@ -91,10 +93,21 @@ def save_reviews(root, episodes, result):
         raise ValueError("原始轨迹映射已变化，不保存部分标记")
     notes = read_reviews(source)
     stamp = datetime.now().isoformat()
+    if result!='exclude' and any(notes.get(str(ep),{}).get('deleted') for ep in indices):
+        raise ValueError('请先恢复已删除轨迹，不保存部分标记')
     for ep in indices:
         notes[str(ep)] = {**notes.get(str(ep),{}),"result":result,
                           "note":notes.get(str(ep),{}).get("note",""),"time":stamp}
     atomic_json(annotation_path(source),notes)
+    return read_reviews(root)
+
+
+def restore_review(root,episode):
+    source,index=review_reference(root,episode)
+    notes=read_reviews(source);row=notes.get(str(index),{})
+    if row.get('deleted'):
+        row={**row,'deleted':False,'result':row.get('before_delete_result','exclude'),'time':datetime.now().isoformat()}
+        row.pop('before_delete_result',None);notes[str(index)]=row;atomic_json(annotation_path(source),notes)
     return read_reviews(root)
 
 

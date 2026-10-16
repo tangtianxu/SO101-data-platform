@@ -108,8 +108,9 @@ def prepare_record(cfg,payload):
     from dataset_library import child_folder
     groups=normalize_groups(payload.get('instruction_groups'))
     if payload.get('episode_tasks'):raise ValueError('不再支持逐条指令；请按每组数量和每组指令配置')
-    cfg['record_seconds']=number(payload.get('record_seconds',cfg['record_seconds']),1,120,'录制时长',True)
-    cfg['reset_seconds']=number(payload.get('reset_seconds',cfg['reset_seconds']),1,120,'复位时长',True)
+    # Legacy duration defaults remain loadable, but desktop capture is Space-driven.
+    payload.pop('record_seconds',None);payload.pop('reset_seconds',None)
+    payload['manual_advance']=True
     cfg['task']=groups[0]['instruction'] if groups else str(payload.get('task',cfg['task'])).strip()
     if not cfg['task'] or len(cfg['task'])>300:raise ValueError('需要 1–300 字的默认语言指令')
     payload['group']=str(payload.get('group') or '固定位置').strip()[:100]

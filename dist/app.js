@@ -22,6 +22,7 @@ phaseNames.JOINT_MOVING='关节目标执行中';
 phaseNames.GROUP_CATCHUP='本组开始已排队 · 等待低速跟随追平';
 phaseNames.MOTION_ANALYZING='分析运动边界（只读）';
 Object.assign(phaseNames,{CROP_MERGING:'合并裁剪集',CROP_VERIFYING:'校验裁剪集',CROP_PUBLISHING:'提交裁剪集'});
+Object.assign(phaseNames,{PAUSING:'暂停并保存中',PAUSED:'已暂停 · 保持力矩',RESUMING:'缓慢恢复跟随'});
 
 async function api(path, body) {
   if(body!==undefined&&runtimeMismatch&&!(path==='/api/command'&&['stop','stop_preview','stop_device'].includes(body.command)))throw Error('窗口与后台版本不同，请正常停止后重开正式入口');
@@ -74,7 +75,7 @@ function setView(next) {
 document.querySelectorAll('[data-view]').forEach(el=>el.addEventListener('click',()=>setView(el.dataset.view)));
 
 function populateConfig(cfg) {
-  const map={'cfg-top':'top_camera','cfg-wrist':'wrist_camera','cfg-preview':'preview_hz','cfg-leader':'leader_usb_serial','cfg-follower':'follower_usb_serial','cfg-datasets':'dataset_home','cfg-checkpoint':'checkpoint','cfg-calibration':'calibration','record-task':'task','record-count':'episodes','record-duration':'record_seconds','reset-duration':'reset_seconds','act-duration':'act_seconds','act-checkpoint':'checkpoint','act-reference':'reference_start_pose'};
+  const map={'cfg-top':'top_camera','cfg-wrist':'wrist_camera','cfg-preview':'preview_hz','cfg-leader':'leader_usb_serial','cfg-follower':'follower_usb_serial','cfg-datasets':'dataset_home','cfg-checkpoint':'checkpoint','cfg-calibration':'calibration','record-task':'task','record-count':'episodes','act-duration':'act_seconds','act-checkpoint':'checkpoint','act-reference':'reference_start_pose'};
   Object.entries(map).forEach(([id,key])=>{$(id).value=cfg[key];});
   $('cfg-rerun').checked=cfg.rerun;
   populatePortableConfig(cfg);
@@ -158,6 +159,7 @@ function updateControls() {
   updateNamingControls();
   updateDatasetBatchControls();
   updateCaptureGroupControls();
+  updateCapturePauseControls();
   $('act-success').disabled=active||job?.kind!=='act'||!job?.finished;
   $('act-failure').disabled=$('act-success').disabled;
   $('save-settings').disabled=resources;
@@ -169,7 +171,7 @@ function updateControls() {
   $('export-crop').textContent=cropPlan?.replacing?'更新此条裁剪（覆盖旧版）':'保存到裁剪集';
   $('crop-browse').disabled=active||!cropPlan?.exists||!!library?.crop_collection;
   document.querySelectorAll('[data-result],#save-note').forEach(button=>button.disabled=active&&state.job?.kind==='crop');
-  $('shortcut-hint').textContent=phase==='RECORDING'?'Space：结束本条并保存。Esc：停止本批。':phase==='RESET'?'Space：结束复位，进入下一条。Esc：停止本批。':'Space 仅在录制 / 复位阶段提前结束。Esc：停止当前任务。';
+  $('shortcut-hint').textContent=phase==='RECORDING'?'不限时。Space：结束本条并保存。Esc：停止本批。':phase==='RESET'?'不限时。Space：结束复位，开始下一条。Esc：停止本批。':phase==='PAUSED'?'暂停中 Space 不推进；点击继续后先缓慢追平。Esc：停止本批。':'Space：结束录制 / 复位。Esc：停止当前任务。';
   updateJointControls();
   applyPortableState();
 }
@@ -188,17 +190,20 @@ function updatePhase() {
   if(job?.group_count)counter=`小组 ${job.group_index}/${job.group_count} · 本组已保存 ${job.group_saved||0}/${job.group_requested}`;
   if(phase==='WAITING_START'&&job?.group_task)$('phase-message').textContent+=' · 本组指令：'+job.group_task;
   if(job?.saved!==undefined)counter+=` · 累计保存 ${job.saved} 条`;
+  if(job?.group_partial)counter+=` · 中断片段 ${job.group_partial} 条（不占计划条数）`;
   if(job?.batch_count)counter=`批量裁剪 ${job.batch_index}/${job.batch_count}`;
   $('phase-count').textContent=counter;
   if(state.active&&job?.deadline){
     const left=Math.max(0,job.deadline-Date.now()/1000);
     $('phase-time').textContent=left.toFixed(1)+' s';
+  }else if(state.active&&['RECORDING','RESET'].includes(phase)){
+    $('phase-time').textContent='不限时 · Space 继续';
   }else if(state.active&&phase==='CROPPING'&&state.telemetry.crop_total){
     $('phase-time').textContent=`${state.telemetry.crop_done} / ${state.telemetry.crop_total} 帧`;
   }else if(state.active&&phase==='MOTION_ANALYZING'){
     $('phase-time').textContent=`${state.telemetry.analysis_done||0} / ${state.telemetry.analysis_total||'—'} 条`;
   }else{$('phase-time').textContent=state.telemetry?.effective_hz?state.telemetry.effective_hz.toFixed(1)+' Hz':'—';}
-  const maximum=phase==='RECORDING'?Number($('record-duration').value):phase==='RESET'?Number($('reset-duration').value):3;
+  const maximum=3;
   $('phase-progress').value=state.active&&job?.deadline?Math.max(0,Math.min(1,1-(job.deadline-Date.now()/1000)/maximum)):state.active&&phase==='CROPPING'?((state.telemetry.crop_done||0)/(state.telemetry.crop_total||1)):0;
   if(state.active&&phase==='MOTION_ANALYZING')$('phase-progress').value=(state.telemetry.analysis_done||0)/(state.telemetry.analysis_total||1);
 }
@@ -309,7 +314,7 @@ $('prepare-record').addEventListener('click',()=>handle((async()=>{
   const instruction_groups=captureGroupPlan();
   const episodes=captureEpisodeCount(instruction_groups.length?instruction_groups.reduce((sum,g)=>sum+g.episodes,0):$('record-count').value);
   const plan=await captureNaming(),{root,existing}=plan;
-  await startJob('record',{capture_mode:plan.mode,parent:plan.parent,dataset_root:root,dataset_spec:plan.spec,task:$('record-task').value,instruction_groups,episodes,record_seconds:Number($('record-duration').value),reset_seconds:Number($('reset-duration').value),group:$('record-group').value,append_confirmed:existing});
+  await startJob('record',{capture_mode:plan.mode,parent:plan.parent,dataset_root:root,dataset_spec:plan.spec,task:$('record-task').value,instruction_groups,episodes,manual_advance:true,group:$('record-group').value,append_confirmed:existing});
 })()));
 $('prepare-teleop').addEventListener('click',()=>handle(startJob('teleop')));
 $('control-teleop').addEventListener('click',()=>handle(startJob('teleop')));
@@ -394,7 +399,7 @@ function renderEpisodeList(){
     const number=document.createElement('span');number.className='episode-number';number.textContent=String(e.index+1).padStart(2,'0');
     const detail=document.createElement('div');detail.className='episode-info';const title=document.createElement('strong');title.textContent=e.source_episode!==undefined?`原始第 ${e.source_episode+1} 条 · 裁剪版`:`Episode ${e.index+1}`;
     const subtitle=document.createElement('span');subtitle.textContent=`${e.duration.toFixed(2)} s · ${e.frames} 帧`;detail.append(title,subtitle);
-    const mark=document.createElement('span');mark.className='episode-mark';mark.textContent={success:'✓',failure:'失败',exclude:'排除'}[library.annotations?.[e.index]?.result]||'';
+    const mark=document.createElement('span');mark.className='episode-mark';mark.textContent=library.annotations?.[e.index]?.deleted?'已删除':{success:'✓',failure:'失败',exclude:'排除'}[library.annotations?.[e.index]?.result]||'';
     button.append(number,detail,mark);button.addEventListener('click',()=>handle(selectEpisode(e.index)));list.append(episodeChoiceRow(button,e));
   });
   updateDatasetBatchControls();
@@ -425,7 +430,7 @@ async function selectEpisode(index){
   }
   reviewTime=0;renderEpisodeList();renderAnnotation();updateReviewTime(0);scheduleDraw();updateControls();
 }
-function renderAnnotation(){document.querySelectorAll('[data-result]').forEach(b=>b.classList.toggle('selected',library?.annotations?.[selectedEpisode?.index]?.result===b.dataset.result));}
+function renderAnnotation(){document.querySelectorAll('[data-result]').forEach(b=>b.classList.toggle('selected',library?.annotations?.[selectedEpisode?.index]?.result===b.dataset.result));updateCapturePauseControls();}
 async function saveAnnotation(result){
   if(!selectedEpisode)return;
   library.annotations=await api('/api/annotation',{root:library.root,episode:selectedEpisode.index,result:result||library.annotations?.[selectedEpisode.index]?.result||'unreviewed',note:$('annotation-note').value,crop_revision:library.crop_revision||null});
@@ -696,7 +701,7 @@ async function loadStartPose(path){
   $('reset-pose-note').textContent='角度和夹爪百分比显示两位小数；未编辑的数值仍保留文件原精度，不改写原文件。';
   $('reset-source').textContent=pose.source_dataset?`当前起点来源：${pose.source_dataset}，第 ${pose.source_episode_zero_based+1} 条实测首帧。不是舵机中位。`:'当前起点来源：'+pose.source+'。保存目标不代表复位路径已通过碰撞验证。';
 }
-installDatasetPicker();installDatasetBatch();
+installDatasetPicker();installDatasetBatch();installCapturePause();
 installCaptureGroupPlan();
 installResetSettings();
 installFeedbackHistory();

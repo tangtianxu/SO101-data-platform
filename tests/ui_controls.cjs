@@ -42,7 +42,7 @@ async function fixture(t){
     }
     return {ok:true,json:async()=>value};
   };
-  for(const name of ['dataset_batch.js','dataset_browser.js','naming.js','history.js','joint_control.js','portable.js','capture_groups.js','app.js']){
+  for(const name of ['capture_pause.js','dataset_batch.js','dataset_browser.js','naming.js','history.js','joint_control.js','portable.js','capture_groups.js','app.js']){
     const file=path.join(root,'dist',name);if(!fs.existsSync(file))continue;
     let code=fs.readFileSync(file,'utf8');
     // Suppress only the polling boot line; test the actual installed handlers and all control functions.
@@ -541,10 +541,67 @@ test('record preparation submits 50 and 200 unchanged to the fake backend',async
     const jobs=f.posted().filter(c=>c.url==='/api/jobs');
     assert.equal(jobs.length,1);assert.equal(jobs[0].body.kind,'record');
     assert.equal(jobs[0].body.options.episodes,count);assert.deepEqual(jobs[0].body.options.instruction_groups,[]);
+    assert.equal(jobs[0].body.options.manual_advance,true);assert.equal('record_seconds' in jobs[0].body.options,false);assert.equal('reset_seconds' in jobs[0].body.options,false);
   }
 });
 
 test('group total rejects integer precision overflow instead of rounding',async t=>{
   const f=await fixture(t);addGroup(f,'抓娃娃',Number.MAX_SAFE_INTEGER);addGroup(f,'抓布块',1);
   assert.throws(()=>f.run('captureGroupPlan()'),/整数范围/);assert.equal(f.$('capture-group-hint').classList.contains('error'),true);
+});
+
+async function capturePauseFixture(t,phase='RECORDING'){
+  const f=await fixture(t);f.snapshot.job={id:'QA-record-pause',kind:'record',phase};f.snapshot.telemetry.episode_frames=5;
+  f.run('setView("capture")');f.render();const fetch=f.w.fetch;
+  const data={job_id:'QA-record-pause',datasets:[{root:'QA/raw',name:'数采',total:2,annotations:{0:{result:'success',note:'旧备注'},1:{result:'exclude',note:'中断',interrupted:true}}}]};
+  f.w.fetch=async(url,options={})=>{
+    const body=options.body?JSON.parse(options.body):null;
+    if(url.startsWith('/api/capture-review')){
+      f.calls.push({url,body});
+      if(body){const row=data.datasets[0].annotations[body.episode];if(body.action==='edit'){row.note=body.note;row.result=body.result;}else if(body.action==='delete'){row.before_delete_result=row.result;row.result='exclude';row.deleted=true;}else if(body.action==='restore'){row.result=row.before_delete_result;row.deleted=false;}}
+      return {ok:true,json:async()=>structuredClone(data)};
+    }
+    if(url==='/api/command'&&body.command==='pause_capture')f.snapshot.job.phase='PAUSED';
+    if(url==='/api/command'&&body.command==='resume_capture')f.snapshot.job.phase='RESUMING';
+    return fetch(url,options);
+  };
+  return f;
+}
+
+test('capture is Space-driven with no duration inputs or timer payloads; pause and resume are explicit, no confirmation modal',async t=>{
+  const f=await capturePauseFixture(t);assert.equal(f.$('record-duration'),null);assert.equal(f.$('reset-duration'),null);
+  assert.match(f.$('phase-time').textContent,/不限时/);assert.equal(f.$('pause-capture').disabled,false);assert.equal(f.$('resume-capture').disabled,true);
+  f.$('pause-capture').click();await pause(0);f.render();assert.equal(f.$('resume-capture').disabled,false);
+  f.$('resume-capture').click();await until(()=>f.run('state.job.phase')==='RESUMING'&&!f.run('pollBusy'));
+  assert.deepEqual(f.posted().map(c=>c.body.command),['pause_capture','resume_capture']);assert.equal(f.posted()[1].body.confirmed,true);
+  assert.equal(f.$('confirm-dialog').open,false);assert.equal(f.$('resume-capture').disabled,true);
+});
+
+test('processing first pauses capture, waits for acknowledgment and opens latest-first notes and recoverable deletion',async t=>{
+  const f=await capturePauseFixture(t);f.$('process-capture').click();await until(()=>f.$('capture-review-dialog').open);
+  assert.equal(f.posted()[0].body.command,'pause_capture');assert.equal(f.$('capture-review-episode').value,'1');assert.match(f.$('capture-review-entry-hint').textContent,/中断片段/);
+  f.$('capture-review-note').value='临时离开';f.$('capture-review-save').click();await until(()=>!f.run('captureReviewBusy'));
+  assert.equal(f.posted().at(-1).body.note,'临时离开');assert.equal(f.$('capture-review-note').value,'临时离开');
+  f.$('capture-review-delete').click();await until(()=>!f.run('captureReviewBusy'));assert.equal(f.$('capture-review-delete').textContent,'恢复此条');
+  assert.equal(f.$('capture-review-result').disabled,true);f.$('capture-review-delete').click();await until(()=>!f.run('captureReviewBusy'));
+  assert.equal(f.$('capture-review-delete').textContent,'删除此条（可恢复）');assert.equal(f.$('confirm-dialog').open,false);
+  assert.equal(f.posted().some(c=>c.url==='/api/jobs'),false);
+});
+
+test('Space cannot resume a paused session or leak through processing inputs; Esc still requests a batch stop',async t=>{
+  const f=await capturePauseFixture(t,'PAUSED');f.w.document.dispatchEvent(new f.w.KeyboardEvent('keydown',{code:'Space',key:' ',bubbles:true}));
+  assert.equal(f.posted().length,0);await f.run('loadCaptureReview()');
+  f.$('capture-review-note').dispatchEvent(new f.w.KeyboardEvent('keydown',{code:'Space',key:' ',bubbles:true}));assert.equal(f.posted().length,0);
+  f.w.document.dispatchEvent(new f.w.KeyboardEvent('keydown',{code:'Escape',key:'Escape',bubbles:true}));await pause(0);
+  assert.equal(f.posted()[0].body.command,'stop');
+});
+
+test('record and reset Space advance their matching phase only; key repeat is ignored',async t=>{
+  const f=await capturePauseFixture(t);
+  for(const phase of ['RECORDING','RESET']){
+    f.snapshot.job.phase=phase;f.render();
+    f.w.document.dispatchEvent(new f.w.KeyboardEvent('keydown',{code:'Space',key:' ',bubbles:true}));
+    f.w.document.dispatchEvent(new f.w.KeyboardEvent('keydown',{code:'Space',key:' ',repeat:true,bubbles:true}));
+  }
+  await pause(0);assert.deepEqual(f.posted().map(c=>c.body.phase),['RECORDING','RESET']);
 });

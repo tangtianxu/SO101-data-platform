@@ -174,7 +174,9 @@ class Platform:
             else:
                 self.job = job
                 self.telemetry = {}
-            if kind=='record':job['dataset_root']=payload['dataset_root']
+            if kind=='record':
+                job['dataset_root']=payload['dataset_root']
+                job['capture_roots']=[t['root'] for t in payload.get('capture_targets',[])] or [payload['dataset_root']]
             if kind=='act':job['feedback_root']=payload['feedback_root']
             if independent_preview or kind in CAMERA_TASKS or kind == "camera_scan":
                 self.frames, self.frame_owner = {}, None
@@ -307,11 +309,11 @@ class Platform:
             self.log("info" if code == 0 else "error", f"工作进程已退出，代码 {code}；设备状态以最终反馈为准")
 
     def command(self, request):
-        allowed = {"stop", "stop_preview", "stop_device", "scene", "start", "advance", "hold", "release", "jog", "reset", "joint_target"}
+        allowed = {"stop", "stop_preview", "stop_device", "scene", "start", "advance", "hold", "release", "jog", "reset", "joint_target", "pause_capture", "resume_capture"}
         name = request.get("command")
         if name not in allowed:
             raise ValueError("未知控制命令")
-        if name in ("scene", "start", "hold", "release", "jog", "reset", "joint_target") and request.get("confirmed") is not True:
+        if name in ("scene", "start", "hold", "release", "jog", "reset", "joint_target", "resume_capture") and request.get("confirmed") is not True:
             raise ValueError("该操作需要界面中的明确确认")
         if self.offline and name not in ("stop", "stop_preview", "stop_device"):
             raise PermissionError("离线验收不接受设备控制命令")
@@ -351,11 +353,20 @@ class Platform:
                 request={**request,'joints':joint_control.validate_request(request,calibration,self.config)}
             if name == "advance" and request.get("phase") not in ("RECORDING", "RESET"):
                 raise ValueError("只有录制/复位阶段可以提前结束")
+            if name in ('pause_capture','resume_capture'):
+                required=('RECORDING','RESET') if name=='pause_capture' else ('PAUSED',)
+                if self.job['kind']!='record' or self.job['phase'] not in required:
+                    raise ValueError('当前采集阶段不接受暂停或继续')
+                if name=='pause_capture' and request.get('phase')!=self.job['phase']:
+                    raise ValueError('阶段已变化，请重试暂停')
             with self.write_lock:
                 self.proc.stdin.write(json.dumps(request, ensure_ascii=False, allow_nan=False) + "\n")
                 self.proc.stdin.flush()
             if name=='joint_target':
                 self.job['target_pending']=True;self.job['target_result']=None
+            if name in ('pause_capture','resume_capture'):
+                self.job.update(phase='PAUSING' if name=='pause_capture' else 'RESUMING',deadline=None,
+                    message='正在暂停并保存片段' if name=='pause_capture' else '正在缓慢追平主臂，尚未录制')
             self.log("info", "已请求：" + name + ("；等待后台确认停止" if name == "stop" else ""))
 
     def save_manual_limits(self,request):
@@ -522,6 +533,9 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/api/dataset":
                 ep = int(query["episode"]) if "episode" in query else None
                 return self.json(self.app.catalog(query["root"], ep))
+            if url.path == '/api/capture-review':
+                from capture_pause import review_catalog
+                with self.app.lock:return self.json(review_catalog(self.app,query.get('job_id')))
             if url.path == '/api/crop-plan':
                 episode=number(query.get('episode',-1),0,100000,'episode',True)
                 return self.json(plan_crop(self.app.config,query['root'],episode))
@@ -545,7 +559,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not (root / "meta/info.json").is_file() or not file.is_relative_to(root) or file.suffix.lower() != ".mp4":
                     raise PermissionError("只允许读取所选数据集的视频")
                 return self.media(file)
-            assets = {"/": "index.html", "/app.js": "app.js", "/dataset_batch.js":"dataset_batch.js", "/dataset_browser.js":"dataset_browser.js", "/capture_groups.js":"capture_groups.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
+            assets = {"/": "index.html", "/app.js": "app.js", "/capture_pause.js":"capture_pause.js", "/dataset_batch.js":"dataset_batch.js", "/dataset_browser.js":"dataset_browser.js", "/capture_groups.js":"capture_groups.js", "/naming.js": "naming.js", "/history.js":"history.js", "/joint_control.js":"joint_control.js", "/portable.js":"portable.js", "/style.css": "style.css", "/layout.css": "layout.css", "/manual_limits.css":"manual_limits.css"}
             if url.path not in assets:
                 return self.json({"error": "未找到"}, 404)
             file = HERE / "dist" / assets[url.path]
@@ -647,6 +661,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/annotations/batch":
                 root = child_folder(self.app.config,request.get("root",""))
                 with self.app.lock:
+                    from capture_pause import require_review_idle
+                    require_review_idle(self.app)
                     if self.app.active() and self.app.job["kind"] == "crop":
                         raise RuntimeError("请等待当前裁剪或分析事务结束，再修改审核状态")
                     if request.get("crop_revision") != review_revision(root):
@@ -654,12 +670,28 @@ class Handler(BaseHTTPRequestHandler):
                     notes = save_reviews(root,request.get("episodes"),request.get("result"))
                     self.app.catalog_cache.clear()
                 return self.json({"annotations":notes,"changed":len(request["episodes"])})
+            if self.path == '/api/capture-review':
+                from capture_pause import review_change
+                with self.app.lock:return self.json(review_change(self.app,request))
+            if self.path == '/api/episode-restore':
+                from review_store import restore_review
+                root=child_folder(self.app.config,request.get('root',''))
+                with self.app.lock:
+                    if self.app.active() and not (self.app.job['kind']=='record' and self.app.job['phase']=='PAUSED'):
+                        raise RuntimeError('请先暂停采集或结束当前任务')
+                    if request.get('crop_revision')!=review_revision(root):raise ValueError('裁剪集已变化，请重新打开')
+                    episode=request.get('episode')
+                    if type(episode) is not int:raise ValueError('轨迹索引无效')
+                    notes=restore_review(root,episode);self.app.catalog_cache.clear()
+                return self.json(notes)
             if self.path == "/api/annotation":
                 root = robot_path(request["root"], existing=True)
                 index = number(request["episode"], 0, 100000, "episode", True)
                 if request.get("result") not in ("success", "failure", "unreviewed", "exclude"):
                     raise ValueError("未知审核标记")
                 with self.app.lock:
+                    from capture_pause import require_review_idle
+                    require_review_idle(self.app)
                     if self.app.active() and self.app.job['kind']=='crop':
                         raise RuntimeError('请等待当前裁剪事务完成，再修改成功/失败状态')
                     if request.get("crop_revision") != review_revision(root):

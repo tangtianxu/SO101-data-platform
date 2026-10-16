@@ -23,6 +23,9 @@
 .capture-group-row label { margin:0;font-size:11px; }
 .capture-group-row textarea { resize:vertical;min-height:54px; }
 .capture-group-row .button { padding:5px;font-size:10px; }
+.capture-pause-actions { margin-top:10px;padding-top:8px;border-top:1px solid var(--line); }
+#capture-review-dialog { max-width:900px; }
+#capture-review-dialog label { margin-top:14px; }
 #capture-group-hint.error { color:#a44b41; }
 .library-create { padding: 0 16px 12px; margin-bottom: 18px; }
 .library-create summary { padding-left: 0; }

@@ -136,7 +136,7 @@ class Bridge:
                         else:
                             self.stop.set()
                         self.state("STOPPING", "已请求停止，等待保存和最终设备反馈")
-                    elif self.session is not None and name in ("scene", "start", "advance"):
+                    elif self.session is not None and name in ("scene", "start", "advance", "pause_capture", "resume_capture"):
                         s = self.session
                         if name == "scene" and s.phase == "SCENE_CHECK":
                             s.scene_approved.set()
@@ -144,6 +144,11 @@ class Bridge:
                             s.recording_start.set()
                         elif name == "advance":
                             s.request_advance(expected_phase=cmd.get("phase"), source="desktop_button")
+                        elif name == "pause_capture" and hasattr(s, 'pause_control'):
+                            if not s.pause_control.request_pause(cmd.get('phase')):
+                                event('phase', phase=s.phase, message='阶段已变化，暂停未应用；请重试')
+                        elif name == "resume_capture" and hasattr(s, 'pause_control'):
+                            s.pause_control.request_resume()
                     elif name == "start" and self.phase == "READY":
                         self.start.set()
                     elif name == "hold" and self.phase == "READY":
@@ -389,6 +394,26 @@ def await_capture_group(session,rec):
             stable=stable+1 if all(e<=t for e,t in zip(residual,[3.]*5+[5.])) else 0
 
 
+def wait_capture_pause(session, rec, bridge):
+    def hold():
+        session.robot.get_observation()
+        session.motion.send(session.motion.last_target)
+        health = session.robot.feedback.latest['health'] if session.robot.feedback and session.robot.feedback.latest else None
+        bridge.emit('telemetry', state=[session.last_obs[n] for n in NAMES], health=health,
+                    frames=session.frames, episode_frames=0)
+    def catchup():
+        last=time.perf_counter();stable=0
+        while stable<3:
+            if session.stop.is_set() or session.events['stop_recording']:raise KeyboardInterrupt
+            observation=session.robot.get_observation()
+            _,target,_=rec.clip_target(session.leader.get_action(),session.robot.limits)
+            residual=[abs(float(observation[n+'.pos'])-float(v)) for n,v in zip(NAMES,target)]
+            now=time.perf_counter();step=rec.catchup_step(session.motion.last_target,target,now-last);last=now
+            session.robot.send_action({n+'.pos':float(v) for n,v in zip(NAMES,step)})
+            stable=stable+1 if all(e<=t for e,t in zip(residual,[3.]*5+[5.])) else 0
+    session.pause_control.wait(hold,catchup)
+
+
 def record_or_teleop(cfg, options, bridge, out, kind):
     import so101_record_supplement as rec
     from lerobot.configs.dataset import DatasetRecordConfig
@@ -399,9 +424,12 @@ def record_or_teleop(cfg, options, bridge, out, kind):
                 "record_loop", "init_keyboard_listener", "log_say", "combine_feature_dicts", "build_dataset_frame")}
     labels = {"SCENE_CHECK": "核对双相机、手、线缆和支撑；确认后才启动同步", "SYNCING": "首次同步：从臂靠近主臂，5°/秒，夹爪 15 百分点/秒",
               "SYNCED": "同步完成", "WAITING_START": "未采集，低速跟随中；请点击开始", "COUNTDOWN": "3 秒倒计时后开始",
-              "RECORDING": "START · 抓放任务，正在录制", "SAVING": "END · 正在保存本条", "RESET": "END · 遥操复位/摆物，不录入任务数据"}
+              "RECORDING": "START · 正在录制，按空格保存本条", "SAVING": "END · 正在保存本条", "RESET": "END · 遥操复位/摆物，按空格开始下一条",
+              "PAUSING": "暂停中，正在保存当前片段", "PAUSED": "已暂停：停止主从跟随、保持力矩；可处理数据，继续后先缓慢追平并进入复位",
+              "RESUMING": "正在缓慢追平主臂，尚未录制；完成后回到复位阶段"}
     class WebSession(rec.Session):
         def state(self, phase, duration=None, **extra):
+            if phase in ('RECORDING', 'RESET'):duration=None
             extra={**getattr(self,'capture_group_data',{}),**extra}
             super().state(phase, duration, **extra)
             bridge.state(phase, labels.get(phase, phase), episode=self.episode,
@@ -420,9 +448,11 @@ def record_or_teleop(cfg, options, bridge, out, kind):
     s = WebSession(SimpleNamespace(group=options.get("group", "遥操"), episodes=cfg["episodes"],
                 dataset_root=Path(options.get("dataset_root", cfg["dataset_home"]))), queue.Queue(maxsize=64))
     s.stop, s.out = bridge.stop, out
+    from capture_pause import PauseControl, mark_interrupted
+    s.pause_control=PauseControl(s)
     bridge.session = s
     report = {"kind": kind, "dataset_root": options.get("dataset_root"), "servo_parameter_changes": False,
-              "sync_once": True, "manual_start": True, "camera_mapping": {n: cfg[n+"_camera"] for n in ("top", "wrist")}}
+              "sync_once": True, "manual_start": True, "manual_advance":True, "camera_mapping": {n: cfg[n+"_camera"] for n in ("top", "wrist")}}
     diag, listener, sensor_log = None, None, None
     preview_stop = threading.Event()
 
@@ -507,7 +537,7 @@ def record_or_teleop(cfg, options, bridge, out, kind):
                     "group_task":target["instruction"],"group_requested":target["episodes"],"group_root":str(root)}
                 if sensor_log:
                     sensor_log.close();sensor_log=None
-                s.episode=before;s.capture_group_data['group_saved']=0
+                s.episode=before;s.capture_group_data.update(group_saved=0,group_partial=0)
                 if group_index>1:
                     await_capture_group(s,rec)
                 report["sensor_target_hz"] = cfg["sensor_hz"]
@@ -558,26 +588,43 @@ def record_or_teleop(cfg, options, bridge, out, kind):
                                     "sample": s.robot.feedback.latest}, ensure_ascii=False, allow_nan=False)+"\n")
                             dataset.add_frame = add_frame
                             dataset._platform_sensor_hook = True
-                    s.state("RECORDING" if dataset is not None else "RESET", kwargs["control_time_s"])
+                    kwargs['control_time_s']=float('inf')
+                    s.state("RECORDING" if dataset is not None else "RESET")
                     if dataset is not None:
                         event("phase", phase="RECORDING", task=task, message="START · "+task)
                     if dataset is not None:
                         rec.announce_phase("START")
-                    result = original["record_loop"](**kwargs)
+                    while True:
+                        result = None if s.pause_control.requested.is_set() else original["record_loop"](**kwargs)
+                        if dataset is None and s.pause_control.requested.is_set():
+                            wait_capture_pause(s,rec,bridge)
+                            s.state('RESET')
+                            continue
+                        break
                     if dataset is not None:
+                        interrupted=s.pause_control.requested.is_set()
+                        interrupted_episode=dataset.num_episodes
+                        frames=s.phase_frame_count
                         s.state("SAVING")
                         rec.announce_phase("END")
                         dataset.save_episode()
-                        s.capture_group_data['group_saved']=dataset.num_episodes-before
+                        if interrupted:
+                            if dataset.num_episodes>interrupted_episode:
+                                mark_interrupted(root,interrupted_episode,frames)
+                                s.capture_group_data['group_partial']+=1
+                            # Saved interrupted clips are traceable but don't consume the requested count.
+                            s.events['rerecord_episode']=True
+                        else:s.capture_group_data['group_saved']+=1
                         event("saved", total=completed_in_session+dataset.num_episodes-before if grouped else dataset.num_episodes,
                               **s.capture_group_data)
+                        if interrupted:wait_capture_pause(s,rec,bridge)
                     return result
                 official.record_loop = loop
                 config = official.RecordConfig(robot=rcfg, teleop=tcfg,
                     dataset=DatasetRecordConfig(repo_id="local/so101_"+hashlib.sha256(str(root).encode()).hexdigest()[:16], root=root, single_task=target["instruction"],
                         fps=30, episode_time_s=cfg["record_seconds"], reset_time_s=cfg["reset_seconds"],
                         num_episodes=target["episodes"], push_to_hub=False, no_stamp=True,
-                        rgb_encoder=RGBEncoderConfig(vcodec="h264", g=30, crf=20, preset="fast"),
+                        rgb_encoder=RGBEncoderConfig(vcodec="h264", g=30, crf=20, preset="fast",extra_options={'bf':'0','tune':'zerolatency'}),
                         streaming_encoding=True, encoder_threads=2),
                     display_data=cfg["rerun"], play_sounds=False, allow_episode_navigation=False, resume=resume)
                 if not resume and root.exists():
