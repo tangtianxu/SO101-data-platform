@@ -71,7 +71,7 @@ function renderMotionPreview(){
     button.addEventListener('click',()=>handle((async()=>{
       if(library?.root!==motionPreview?.dataset_root)throw Error('当前数据集已变化，请重新分析');
       $('motion-trim-dialog').close();await selectEpisode(item.episode);
-      $('crop-start').value=item.start.toFixed(6);$('crop-end').value=item.end.toFixed(6);updateCropHint();seek(item.start);
+      $('crop-start').value=item.start.toFixed(6);$('crop-end').value=item.end.toFixed(6);cropSelectionChanged();seek(item.start);
       $('trajectory-chart').scrollIntoView({block:'center',behavior:'smooth'});
     })()));action.append(button);row.append(action);list.append(row);
   }

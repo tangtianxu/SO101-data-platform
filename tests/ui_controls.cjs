@@ -22,7 +22,8 @@ async function fixture(t){
   const run=code=>vm.runInContext(code,context);
   w.ResizeObserver=class{observe(){}disconnect(){}};
   w.HTMLElement.prototype.scrollIntoView=function(){};
-  w.HTMLMediaElement.prototype.pause=function(){};w.HTMLMediaElement.prototype.load=function(){};
+  w.HTMLMediaElement.prototype.pause=function(){this.__qaPaused=true;};w.HTMLMediaElement.prototype.load=function(){};
+  w.HTMLMediaElement.prototype.play=function(){this.__qaPaused=false;return Promise.resolve();};
   const canvas=new Proxy({measureText:()=>({width:0})},{get:(o,k)=>o[k]||(()=>{})});w.HTMLCanvasElement.prototype.getContext=()=>canvas;
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
   w.HTMLDialogElement.prototype.close=function(value){this.returnValue=value;this.open=false;this.dispatchEvent(new w.Event('close'));};
@@ -308,6 +309,92 @@ async function batchFixture(t){
   f.run('revealDatasetChoice("QA/raw-batch");resetEpisodeSelection("QA/raw-batch");library=window.__library;renderEpisodeList();updateDatasetBatchControls();');
   return f;
 }
+
+async function reviewFixture(t){
+  const f=await batchFixture(t);
+  f.w.__review={index:0,duration:30,tasks:['抓娃娃'],videos:{'observation.images.top':{exists:true,url:'/qa-top.mp4',start:100},'observation.images.wrist':{exists:true,url:'/qa-wrist.mp4',start:200}}};
+  f.run('selectedEpisode=window.__review;reviewTime=0;$("review-timeline").max=30;$("crop-start").value=16;$("crop-end").value=28;cropSelectionChanged();');
+  for(const [name,offset] of [['top',100],['wrist',200]]){
+    const video=f.$('review-'+name);Object.defineProperty(video,'readyState',{configurable:true,value:4});
+    video.src='/qa-'+name+'.mp4';video.currentTime=offset;video.playbackRate=1;
+  }
+  return f;
+}
+
+test('chart selection button plays both cameras from selected start with independent file offsets, without writes',async t=>{
+  const f=await reviewFixture(t);f.$('play-selection').click();await until(()=>f.run('playbackActive'));
+  assert.equal(f.$('review-top').currentTime,116);assert.equal(f.$('review-wrist').currentTime,216);
+  assert.equal(f.$('review-scope').value,'selection');assert.equal(f.$('play-pause').textContent,'暂停');
+  assert.match(f.$('selection-playback-hint').textContent,/16.00–28.00/);assert.match(f.$('review-playback-hint').textContent,/不会保存/);
+  assert.equal(f.calls.length,0);assert.equal(f.$('confirm-dialog').open,false);f.run('pausePlayback()');
+});
+
+test('ordinary play respects the selection; pause/resume retains range and endpoint stops both videos before next episode',async t=>{
+  const f=await reviewFixture(t);f.$('play-pause').click();await until(()=>f.run('playbackActive'));
+  assert.equal(f.$('review-top').currentTime,116);
+  f.$('review-top').currentTime=117;f.$('review-top').dispatchEvent(new f.w.Event('timeupdate'));
+  f.$('play-pause').click();assert.equal(f.run('playbackActive'),false);assert.equal(f.$('review-scope').value,'selection');
+  f.$('play-pause').click();await until(()=>f.run('playbackActive'));assert.equal(f.$('review-top').currentTime,117);
+  f.$('review-top').currentTime=128.2;f.$('review-top').dispatchEvent(new f.w.Event('timeupdate'));
+  assert.equal(f.run('playbackActive'),false);assert.equal(f.$('review-top').__qaPaused,true);assert.equal(f.$('review-wrist').__qaPaused,true);
+  assert.ok(Math.abs(f.run('reviewTime')-(28-1/30))<1e-7);
+  assert.ok(Math.abs(f.$('review-wrist').currentTime-(228-1/30))<1e-7);
+  f.$('play-pause').click();await until(()=>f.run('playbackActive'));assert.equal(f.$('review-top').currentTime,116);
+  assert.equal(f.calls.length,0);f.run('pausePlayback()');
+});
+
+test('whole episode is an explicit alternative and ignores selection endpoints',async t=>{
+  const f=await reviewFixture(t);f.$('review-scope').value='episode';f.$('review-scope').dispatchEvent(new f.w.Event('change'));
+  f.$('play-pause').click();await until(()=>f.run('playbackActive'));assert.equal(f.$('review-top').currentTime,100);
+  f.$('review-top').currentTime=129;f.$('review-top').dispatchEvent(new f.w.Event('timeupdate'));assert.equal(f.run('playbackActive'),true);
+  f.$('review-top').currentTime=130.1;f.$('review-top').dispatchEvent(new f.w.Event('timeupdate'));assert.equal(f.run('playbackActive'),false);
+  assert.ok(f.run('reviewTime')<30);assert.equal(f.$('review-scope').value,'episode');assert.equal(f.calls.length,0);
+});
+
+test('changing the selection pauses playback, updates caption and rejects blank, reversed or outside ranges',async t=>{
+  const f=await reviewFixture(t);await f.run('play()');f.input('crop-start',17);
+  assert.equal(f.run('playbackActive'),false);assert.match(f.$('selection-playback-hint').textContent,/17.00–28.00/);
+  for(const [start,end] of [['',28],[17,''],[29,28],[17,31]]){
+    f.input('crop-start',start);f.input('crop-end',end);assert.equal(f.$('play-selection').disabled,true);assert.equal(f.$('play-pause').disabled,true);
+    await assert.rejects(f.run('playSelection()'),/保留范围/);assert.equal(f.run('playbackActive'),false);
+  }
+  assert.equal(f.calls.length,0);
+});
+
+test('wrist-only playback follows the same range and a failed second camera pauses both',async t=>{
+  const f=await reviewFixture(t);f.run('selectedEpisode.videos["observation.images.top"].exists=false');
+  await f.run('playSelection()');assert.equal(f.$('review-wrist').currentTime,216);
+  f.$('review-wrist').currentTime=228;f.$('review-wrist').dispatchEvent(new f.w.Event('timeupdate'));assert.equal(f.run('playbackActive'),false);
+  f.run('selectedEpisode.videos["observation.images.top"].exists=true');f.$('review-wrist').play=()=>Promise.reject(Error('test decoder failure'));
+  await assert.rejects(f.run('playSelection()'),/decoder failure/);
+  assert.equal(f.run('playbackActive'),false);assert.equal(f.$('review-top').__qaPaused,true);assert.equal(f.$('review-wrist').__qaPaused,true);
+  assert.equal(f.calls.length,0);
+});
+
+test('dragging a chart boundary pauses, changes the playback window and leaves click-to-seek working',async t=>{
+  const f=await reviewFixture(t),chart=f.$('trajectory-chart');chart.getBoundingClientRect=()=>({left:0,width:1087,height:225});chart.setPointerCapture=()=>{};
+  await f.run('playSelection()');
+  function pointer(type,time){chart.dispatchEvent(new f.w.MouseEvent(type,{bubbles:true,clientX:45+time/30*1000}));}
+  pointer('pointerdown',16);pointer('pointermove',17);pointer('pointerup',17);
+  assert.equal(f.run('playbackActive'),false);assert.equal(Number(f.$('crop-start').value),17);assert.match(f.$('selection-playback-hint').textContent,/17.00–28.00/);
+  pointer('pointerdown',20);assert.ok(Math.abs(f.run('reviewTime')-20)<1e-7);
+  await f.run('play()');assert.ok(Math.abs(f.$('review-top').currentTime-120)<1e-7);f.run('pausePlayback()');assert.equal(f.calls.length,0);
+});
+
+test('boundary timer stops at the selected endpoint even without timeupdate or animation frames, including double speed',async t=>{
+  const f=await reviewFixture(t);f.w.requestAnimationFrame=()=>123;
+  f.input('crop-end',16.2);f.$('playback-speed').value='2';f.$('playback-speed').dispatchEvent(new f.w.Event('change'));
+  await f.run('playSelection()');assert.equal(f.$('review-top').playbackRate,2);
+  f.$('review-top').currentTime=116.2;await until(()=>!f.run('playbackActive'));
+  assert.ok(f.run('reviewTime')<16.2);assert.equal(f.$('review-wrist').__qaPaused,true);assert.equal(f.calls.length,0);
+});
+
+test('a pause while media play is pending cannot restart the playback loop',async t=>{
+  const f=await reviewFixture(t);let resolve;f.$('review-top').play=()=>new Promise(done=>resolve=done);
+  const pending=f.run('playSelection()');f.run('pausePlayback()');resolve();await pending;
+  assert.equal(f.run('playbackActive'),false);assert.equal(f.run('playbackTick'),0);assert.equal(f.run('playbackBoundaryTimer'),0);
+  assert.equal(f.$('play-pause').textContent,'播放');assert.equal(f.calls.length,0);
+});
 
 test('batch episode checkboxes select all or filtered rows without opening videos or commands',async t=>{
   const f=await batchFixture(t);

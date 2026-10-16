@@ -12,7 +12,8 @@ const jointColors = ['#1c7bc0','#d47816','#a14fb8','#dc4a6c','#14987d','#647045'
 let datasetItems=[], lastArchive=null;
 const phaseNames = {LOADING:'准备中', PREPARING:'准备设备', PREVIEW:'仅预览', SCANNING:'检测相机', MONITOR:'只读监控', CONTROL:'基本控制', SCENE_CHECK:'检查画面', SYNCING:'低速同步', SYNCED:'同步完成', WAITING_START:'等待手动开始', COUNTDOWN:'即将开始', RECORDING:'START · 正在录制', SAVING:'END · 正在保存', RESET:'END · 复位中', RESET_FINISHED:'复位结束', FOLLOWING:'遥操跟随中', PREFLIGHT:'只读预检', MODEL_LOADING:'加载 ACT', CAMERAS:'准备相机', WARMUP:'GPU 预热', READY:'就绪 · 等待开始', RESETTING:'复位到参考起点', ALIGNING:'低速对齐', RUNNING:'ACT 正在执行', FINISHING:'正在收尾', STOPPING:'等待停止确认', FINISHED:'已结束', ERROR:'发生异常', REPLAY_READY:'回放准备完成', REPLAYING:'真机轨迹回放', CROPPING:'正在裁剪副本'};
 let state = null, view = 'capture', initialized = false, requestBusy = false, pollBusy = false;
-let library = null, selectedEpisode = null, reviewTime = 0, cropPreview = false, lastJob = null;
+let library = null, selectedEpisode = null, reviewTime = 0, lastJob = null;
+let playbackActive=false, playbackEpoch=0, playbackTick=0, playbackBoundaryTimer=0;
 let cropPlan=null;
 let lastErrorAt = 0, toastTimer, drawRequest = 0;
 let lastPreview=null, operationEpoch=0;
@@ -414,12 +415,13 @@ async function selectEpisode(index){
   renderFeatures();
   $('review-timeline').max=selectedEpisode.duration;$('review-timeline').step=1/library.fps;
   $('crop-start').value='0';$('crop-end').value=selectedEpisode.duration.toFixed(6);
+  $('review-scope').value='selection';updatePlaybackControls();
   handle(syncCropNaming());
   $('annotation-note').value=library.annotations?.[index]?.note||'';
   for(const name of ['top','wrist']){
     const video=$('review-'+name),meta=selectedEpisode.videos['observation.images.'+name];
     video.removeAttribute('src');video.load();
-    if(meta?.exists){video.src=meta.url;video.onloadedmetadata=()=>{video.currentTime=meta.start;video.playbackRate=Number($('playback-speed').value);};video.load();}
+    if(meta?.exists){video.src=meta.url;video.onloadedmetadata=()=>{if(ticket!==selectedLoad)return;video.currentTime=meta.start+reviewTime;video.playbackRate=Number($('playback-speed').value);};video.load();}
   }
   reviewTime=0;renderEpisodeList();renderAnnotation();updateReviewTime(0);scheduleDraw();updateControls();
 }
@@ -432,7 +434,22 @@ async function saveAnnotation(result){
 }
 document.querySelectorAll('[data-result]').forEach(b=>b.addEventListener('click',()=>handle(saveAnnotation(b.dataset.result))));
 $('save-note').addEventListener('click',()=>handle(saveAnnotation()));
-function pausePlayback(){for(const name of ['top','wrist'])$('review-'+name).pause();$('play-pause').textContent='播放';cropPreview=false;}
+function reviewVideos(){return ['top','wrist'].map(name=>({video:$('review-'+name),meta:selectedEpisode?.videos['observation.images.'+name]})).filter(({video,meta})=>meta?.exists&&video.getAttribute('src'));}
+function playbackRange(){return $('review-scope').value==='selection'?cropRange():{start:0,end:selectedEpisode.duration};}
+function updatePlaybackControls(){
+  let range=null;try{range=cropRange();}catch{}
+  const selection=$('review-scope').value==='selection';
+  $('play-pause').textContent=playbackActive?'暂停':'播放';
+  $('play-pause').disabled=!selectedEpisode||(selection&&!range);
+  for(const id of ['play-selection','preview-crop'])$(id).disabled=!range;
+  $('selection-playback-hint').textContent=range?'选中 '+range.start.toFixed(2)+'–'+range.end.toFixed(2)+' s · '+(range.end-range.start).toFixed(2)+' 秒':'请设置有效的起止时间';
+  $('review-scope').disabled=!selectedEpisode;
+  $('review-playback-hint').textContent=selection?'播放选中片段，到终点自动暂停；暂停后可继续。仅回看，不会保存裁剪。':'播放整条轨迹；切换“选中片段”可只看绿色区间。';
+}
+function pausePlayback(){
+  playbackActive=false;playbackEpoch++;cancelAnimationFrame(playbackTick);clearTimeout(playbackBoundaryTimer);playbackTick=0;playbackBoundaryTimer=0;
+  for(const name of ['top','wrist'])$('review-'+name).pause();updatePlaybackControls();
+}
 function updateReviewTime(time){reviewTime=time;$('review-timeline').value=time;$('review-time').textContent=`${time.toFixed(2)} / ${(selectedEpisode?.duration||0).toFixed(2)} s`;scheduleDraw();}
 function seek(time){
   if(!selectedEpisode)return;
@@ -442,30 +459,50 @@ function seek(time){
 }
 async function play(){
   if(!selectedEpisode)return;
-  if(reviewTime>=selectedEpisode.duration-1/library.fps)seek(0);
-  const promises=[];for(const name of ['top','wrist']){const video=$('review-'+name);if(video.getAttribute('src'))promises.push(video.play());}
-  await Promise.all(promises);$('play-pause').textContent='暂停';
+  const {start,end}=playbackRange(),videos=reviewVideos();
+  if(!videos.length)throw Error('本条没有可播放的视频');
+  if(reviewTime<start||reviewTime>=end-1/library.fps-1e-6)seek(start);
+  const epoch=++playbackEpoch;playbackActive=true;updatePlaybackControls();
+  try{await Promise.all(videos.map(({video})=>video.play()));}
+  catch(e){if(epoch!==playbackEpoch)return;pausePlayback();throw e;}
+  if(epoch!==playbackEpoch)return;
+  function tick(){if(!playbackActive||epoch!==playbackEpoch)return;syncReviewPlayback();if(playbackActive)playbackTick=requestAnimationFrame(tick);}
+  tick();schedulePlaybackBoundary();
 }
-$('play-pause').addEventListener('click',()=>handle($('review-top').paused?play():pausePlayback()));
-$('previous-frame').addEventListener('click',()=>{pausePlayback();seek(reviewTime-1/library.fps);});
-$('next-frame').addEventListener('click',()=>{pausePlayback();seek(reviewTime+1/library.fps);});
+function syncReviewPlayback(){
+  if(!selectedEpisode)return;const videos=reviewVideos(),primary=videos[0];if(!primary)return;
+  const t=Math.max(0,primary.video.currentTime-primary.meta.start);
+  if(playbackActive){
+    const {start,end}=playbackRange();
+    if(t>=end-.5/library.fps){pausePlayback();seek(Math.max(start,end-1/library.fps));return;}
+    if(t<start-1e-5){seek(start);return;}
+    for(const {video,meta} of videos.slice(1))if(video.readyState>=1&&Math.abs(video.currentTime-meta.start-t)>.12)video.currentTime=meta.start+t;
+  }
+  const time=Math.min(t,selectedEpisode.duration);if(Math.abs(time-reviewTime)>1e-5)updateReviewTime(time);
+}
+function schedulePlaybackBoundary(){
+  clearTimeout(playbackBoundaryTimer);if(!playbackActive)return;
+  const primary=reviewVideos()[0];if(!primary)return;
+  const remaining=playbackRange().end-(primary.video.currentTime-primary.meta.start);
+  playbackBoundaryTimer=setTimeout(()=>{syncReviewPlayback();schedulePlaybackBoundary();},Math.max(20,remaining/primary.video.playbackRate*1000));
+}
+async function playSelection(){const {start}=cropRange();pausePlayback();$('review-scope').value='selection';seek(start);await play();}
+$('play-pause').addEventListener('click',()=>handle(playbackActive?pausePlayback():play()));
+$('review-scope').addEventListener('change',()=>{pausePlayback();});
+$('play-selection').addEventListener('click',()=>handle(playSelection()));
+$('previous-frame').addEventListener('click',()=>{if(selectedEpisode){pausePlayback();seek(reviewTime-1/library.fps);}});
+$('next-frame').addEventListener('click',()=>{if(selectedEpisode){pausePlayback();seek(reviewTime+1/library.fps);}});
 $('review-timeline').addEventListener('input',()=>{pausePlayback();seek(Number($('review-timeline').value));});
-$('playback-speed').addEventListener('change',()=>{for(const name of ['top','wrist'])$('review-'+name).playbackRate=Number($('playback-speed').value);});
-$('review-top').addEventListener('timeupdate',()=>{
-  if(!selectedEpisode)return;const meta=selectedEpisode.videos['observation.images.top'];if(!meta)return;
-  const t=Math.max(0,$('review-top').currentTime-meta.start),limit=cropPreview?Number($('crop-end').value):selectedEpisode.duration;
-  updateReviewTime(Math.min(t,selectedEpisode.duration));
-  if(t>=limit-.5/library.fps){pausePlayback();return;}
-  const wrist=selectedEpisode.videos['observation.images.wrist'];
-  if(wrist&&!$('review-top').paused&&$('review-wrist').readyState>=1&&Math.abs(($('review-wrist').currentTime-wrist.start)-t)>.12)$('review-wrist').currentTime=wrist.start+t;
-});
+$('playback-speed').addEventListener('change',()=>{for(const name of ['top','wrist'])$('review-'+name).playbackRate=Number($('playback-speed').value);schedulePlaybackBoundary();});
+for(const name of ['top','wrist'])$('review-'+name).addEventListener('timeupdate',()=>{if(reviewVideos()[0]?.video===$('review-'+name))syncReviewPlayback();});
 for(const name of ['top','wrist'])$('review-'+name).addEventListener('error',()=>{if($('review-'+name).getAttribute('src'))toast(`${name} 视频无法解码。原录像未修改，请检查编码支持。`,true);});
-$('mark-start').addEventListener('click',()=>{$('crop-start').value=reviewTime.toFixed(6);updateCropHint();});
-$('mark-end').addEventListener('click',()=>{$('crop-end').value=reviewTime.toFixed(6);updateCropHint();});
-function cropRange(){const start=Number($('crop-start').value),end=Number($('crop-end').value);if(!selectedEpisode||!Number.isFinite(start)||!Number.isFinite(end)||start<0||start>=end||end>selectedEpisode.duration+1e-5)throw new Error('保留范围应满足 0 ≤ 起点 < 终点 ≤ 本条时长');return {start,end};}
+$('mark-start').addEventListener('click',()=>{$('crop-start').value=reviewTime.toFixed(6);cropSelectionChanged();});
+$('mark-end').addEventListener('click',()=>{$('crop-end').value=reviewTime.toFixed(6);cropSelectionChanged();});
+function cropRange(){const a=$('crop-start').value.trim(),b=$('crop-end').value.trim(),start=Number(a),end=Number(b);if(!selectedEpisode||!a||!b||!Number.isFinite(start)||!Number.isFinite(end)||start<0||start>=end||end>selectedEpisode.duration+1e-5)throw new Error('保留范围应满足 0 ≤ 起点 < 终点 ≤ 本条时长');return {start,end:Math.min(end,selectedEpisode.duration)};}
 function updateCropHint(){try{const {start,end}=cropRange();$('crop-hint').textContent=cropPlan&&!cropPlan.can_crop?cropPlan.reason:`保留 ${start.toFixed(2)}–${end.toFixed(2)} s，约 ${(end-start).toFixed(2)} 秒。${cropPlan?.replacing?'重剪将替换此原轨迹已有的裁剪，不增加条数。':'同一来源统一保存到一个裁剪集，每条原轨迹仅一份。'}`;}catch(e){$('crop-hint').textContent=e.message;}scheduleDraw();}
-['crop-start','crop-end'].forEach(id=>$(id).addEventListener('input',updateCropHint));
-$('preview-crop').addEventListener('click',()=>handle((async()=>{const {start}=cropRange();pausePlayback();seek(start);cropPreview=true;await play();})()));
+function cropSelectionChanged(){pausePlayback();$('review-scope').value='selection';updateCropHint();updatePlaybackControls();}
+['crop-start','crop-end'].forEach(id=>$(id).addEventListener('input',cropSelectionChanged));
+$('preview-crop').addEventListener('click',()=>handle(playSelection()));
 $('export-crop').addEventListener('click',()=>handle((async()=>{
   if(!cropPlan?.can_crop||library.annotations?.[selectedEpisode.index]?.result!=='success')throw Error('只有成功的原始轨迹才允许裁剪');
   const range=cropRange();
@@ -532,7 +569,7 @@ $('trajectory-chart').addEventListener('pointermove',e=>{
   t=Math.round(t*library.fps)/library.fps;
   if(cropDrag==='crop-start')t=Math.min(t,Number($('crop-end').value)-1/library.fps);
   else t=Math.max(t,Number($('crop-start').value)+1/library.fps);
-  $(cropDrag).value=t.toFixed(6);updateCropHint();
+  $(cropDrag).value=t.toFixed(6);cropSelectionChanged();
 });
 for(const name of ['pointerup','pointercancel'])$('trajectory-chart').addEventListener(name,()=>{cropDrag=null;});
 

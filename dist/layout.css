@@ -39,6 +39,11 @@
 .joint-color-4 { color: #14987d; }
 .joint-color-5 { color: #647045; }
 #trajectory-chart { height: 225px; }
+.playback { flex-wrap: wrap; }
+.playback #review-scope { width: 110px; max-width: none; flex-shrink: 0; }
+.playback #review-playback-hint { flex-basis: 100%; order:10; margin: 0; }
+.selection-playback { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px; padding:0 16px 12px; }
+#selection-playback-hint { color:var(--accent); font-size:12px; font-variant-numeric:tabular-nums; }
 .signal-values { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 7px; padding: 5px 16px 15px; font-variant-numeric: tabular-nums; }
 .signal-values span { background: #f7f9fb; border-radius: 5px; padding: 7px; font-size: 11px; }
 .feature-inventory { border-top: 1px solid var(--line); }
